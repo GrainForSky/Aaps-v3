@@ -188,6 +188,7 @@ function ConfigScreen({
 
   const handleSave = () => {
     onSave({ url, apiSecret });
+    onBack(); // 保存后关闭对话框
   };
 
   return (

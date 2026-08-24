@@ -2,13 +2,17 @@
 // AndroidAPS Remote Control - Type Definitions
 // ============================================
 
-// 安全规则
+import { SYSTEM_CONFIG } from './config';
+
+// 安全规则（从配置文件读取）
 export const SAFETY_RULES = {
-  MAX_BOLUS_UNITS: 25,
-  MAX_CARBS_GRAMS: 150,
-  INSULIN_LOCK_MINUTES: 15,
-  CARBS_LOCK_MINUTES: 1,
-  COMMAND_EXPIRY_MINUTES: 5,
+  MAX_BOLUS_UNITS: SYSTEM_CONFIG.doseLimits.maxInsulin,
+  MAX_CARBS_GRAMS: SYSTEM_CONFIG.doseLimits.maxCarbs,
+  MIN_BOLUS_UNITS: SYSTEM_CONFIG.doseLimits.minInsulin,
+  MIN_CARBS_GRAMS: SYSTEM_CONFIG.doseLimits.minCarbs,
+  INSULIN_LOCK_MINUTES: SYSTEM_CONFIG.safetyLock.insulinLockMinutes,
+  CARBS_LOCK_MINUTES: SYSTEM_CONFIG.safetyLock.carbsLockMinutes,
+  COMMAND_EXPIRY_MINUTES: SYSTEM_CONFIG.command.expiryMinutes,
 } as const;
 
 // 设备注册请求
