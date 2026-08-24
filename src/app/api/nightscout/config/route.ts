@@ -1,96 +1,65 @@
 import { NextRequest, NextResponse } from 'next/server';
-import crypto from 'crypto';
-import { checkRateLimit } from '@/lib/store';
-import { RATE_LIMITS } from '@/lib/types';
-
-function hashApiSecret(secret: string): string {
-  return crypto.createHash('sha1').update(secret).digest('hex');
-}
-
-function getHeaders(apiSecret: string): Record<string, string> {
-  return {
-    'Content-Type': 'application/json',
-    'api-secret': hashApiSecret(apiSecret),
-  };
-}
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { nightscoutUrl, apiSecret } = body;
+    const { url, apiSecret } = body;
 
-    if (!nightscoutUrl || !apiSecret) {
+    if (!url || !apiSecret) {
       return NextResponse.json(
-        { error: 'Missing Nightscout URL or API Secret' },
+        { success: false, message: '缺少必填参数' },
         { status: 400 }
       );
     }
 
-    // Rate limiting
-    const rateLimit = checkRateLimit('nightscout:config', RATE_LIMITS.NIGHTSCOUT_CONFIG);
-    if (!rateLimit.allowed) {
-      return NextResponse.json(
-        { error: '请求过于频繁，请稍后再试' },
-        { status: 429 }
-      );
-    }
+    // 测试 Nightscout 连接
+    const baseUrl = url.replace(/\/$/, '');
+    const headers: Record<string, string> = {
+      'api-secret': apiSecret,
+    };
 
-    // Try multiple endpoints for compatibility with different Nightscout versions
-    const baseUrl = nightscoutUrl.replace(/\/$/, '');
+    // 依次尝试多个端点
     const endpoints = [
-      '/api/v1/status.json',
-      '/api/v1/entries.json?count=1',
-      '/api/v1/auth/test',
+      `${baseUrl}/api/v1/status.json`,
+      `${baseUrl}/api/v1/entries.json?count=1`,
+      `${baseUrl}/api/v1/treatments.json?count=1`,
     ];
 
-    let lastError = '';
     let connected = false;
-    let responseData = null;
+    let lastError = '';
 
     for (const endpoint of endpoints) {
       try {
-        const url = `${baseUrl}${endpoint}`;
-        const response = await fetch(url, {
-          method: 'GET',
-          headers: getHeaders(apiSecret),
+        const response = await fetch(endpoint, {
+          headers,
           signal: AbortSignal.timeout(10000),
         });
 
         if (response.ok) {
-          try {
-            responseData = await response.json();
-          } catch {
-            responseData = { status: 'ok' };
-          }
           connected = true;
           break;
-        } else {
-          lastError = `Endpoint ${endpoint} returned ${response.status}`;
         }
-      } catch (err) {
-        lastError = err instanceof Error ? err.message : 'Unknown error';
-        // If it's a network error, no point trying other endpoints
-        if (lastError.includes('fetch failed') || lastError.includes('ECONNREFUSED') || lastError.includes('ENOTFOUND')) {
-          break;
-        }
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : '未知错误';
       }
     }
 
-    if (!connected) {
-      const isNetworkError = lastError.includes('fetch failed') || lastError.includes('ECONNREFUSED') || lastError.includes('ENOTFOUND');
-      return NextResponse.json(
-        { error: isNetworkError ? `无法连接到 Nightscout 服务器，请检查 URL 是否正确` : `连接失败: ${lastError}` },
-        { status: isNetworkError ? 502 : 400 }
-      );
+    if (connected) {
+      return NextResponse.json({
+        success: true,
+        message: 'Nightscout 连接成功',
+      });
     }
 
-    return NextResponse.json({ success: true, data: responseData });
+    return NextResponse.json({
+      success: false,
+      message: `Nightscout 连接失败: ${lastError}`,
+    });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    const isNetworkError = message.includes('fetch failed') || message.includes('ECONNREFUSED') || message.includes('ENOTFOUND');
+    console.error('Nightscout config error:', error);
     return NextResponse.json(
-      { error: isNetworkError ? `无法连接到 Nightscout 服务器，请检查 URL 是否正确` : `Connection test failed: ${message}` },
-      { status: isNetworkError ? 502 : 500 }
+      { success: false, message: '服务器内部错误' },
+      { status: 500 }
     );
   }
 }

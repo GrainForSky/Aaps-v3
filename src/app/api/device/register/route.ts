@@ -1,63 +1,56 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { registerDevice, checkRateLimit } from '@/lib/store';
-import { RATE_LIMITS, PHONE_REGEX, DEVICE_ID_REGEX } from '@/lib/types';
-import type { DeviceRegisterRequest, DeviceRegisterResponse } from '@/lib/types';
+import { isValidPhone, isValidDeviceId } from '@/lib/utils';
 
-/**
- * POST /api/device/register
- * 设备注册（AndroidAPS 启动时调用）
- * 返回 deviceToken 用于后续认证
- */
 export async function POST(request: NextRequest) {
   try {
-    const body: DeviceRegisterRequest = await request.json();
+    const body = await request.json();
     const { phone, deviceId, appVersion } = body;
 
-    // Input validation
+    // 参数验证
     if (!phone || !deviceId || !appVersion) {
       return NextResponse.json(
-        { success: false, message: '缺少 phone、deviceId 或 appVersion 参数' },
-        { status: 400 },
+        { success: false, message: '缺少必填参数' },
+        { status: 400 }
       );
     }
 
-    if (!PHONE_REGEX.test(phone)) {
+    if (!isValidPhone(phone)) {
       return NextResponse.json(
-        { success: false, message: '无效的手机号格式' },
-        { status: 400 },
+        { success: false, message: '手机号格式不正确' },
+        { status: 400 }
       );
     }
 
-    if (!DEVICE_ID_REGEX.test(deviceId)) {
+    if (!isValidDeviceId(deviceId)) {
       return NextResponse.json(
-        { success: false, message: '无效的设备 ID 格式' },
-        { status: 400 },
+        { success: false, message: '设备ID格式不正确' },
+        { status: 400 }
       );
     }
 
-    // Rate limiting
-    const rateLimit = checkRateLimit(`register:${phone}`, RATE_LIMITS.DEVICE_REGISTER);
-    if (!rateLimit.allowed) {
+    // 速率限制：5次/分钟
+    const rateLimitKey = `register:${phone}`;
+    if (!checkRateLimit(rateLimitKey, 5, 60000)) {
       return NextResponse.json(
         { success: false, message: '请求过于频繁，请稍后再试' },
-        { status: 429 },
+        { status: 429 }
       );
     }
 
-    const device = registerDevice(phone, deviceId, appVersion);
+    // 注册设备
+    const result = registerDevice(phone, deviceId, appVersion);
 
-    const response: DeviceRegisterResponse = {
+    return NextResponse.json({
       success: true,
-      message: `设备 ${deviceId} 注册成功`,
-      deviceToken: device.deviceToken,
-    };
-
-    return NextResponse.json(response);
+      message: result.message,
+      deviceToken: result.deviceToken,
+    });
   } catch (error) {
-    console.error('[Device Register] Error:', error);
+    console.error('Device register error:', error);
     return NextResponse.json(
-      { success: false, message: '设备注册失败' },
-      { status: 500 },
+      { success: false, message: '服务器内部错误' },
+      { status: 500 }
     );
   }
 }

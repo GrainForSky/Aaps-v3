@@ -1,118 +1,92 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createCommand, getDeviceStatus, checkRateLimit } from '@/lib/store';
-import { SAFETY_RULES, RATE_LIMITS, PHONE_REGEX } from '@/lib/types';
-import type { CreateCommandRequest, CreateCommandResponse } from '@/lib/types';
+import { createCommand, isAuthenticated, checkRateLimit, getDevice } from '@/lib/store';
+import { SAFETY_RULES } from '@/lib/types';
 
-/**
- * POST /api/command/create
- * Web 前端创建远程控制命令
- * 需要验证用户登录手机号与目标设备一致
- */
 export async function POST(request: NextRequest) {
   try {
-    const body: CreateCommandRequest = await request.json();
+    const body = await request.json();
     const { phone, type, insulin, carbs } = body;
+    const userPhone = request.headers.get('x-user-phone');
 
-    // Input validation
-    if (!phone || !type) {
-      return NextResponse.json(
-        { success: false, commandId: '', message: '缺少 phone 或 type 参数' },
-        { status: 400 },
-      );
-    }
-
-    if (!PHONE_REGEX.test(phone)) {
-      return NextResponse.json(
-        { success: false, commandId: '', message: '无效的手机号格式' },
-        { status: 400 },
-      );
-    }
-
-    // Verify user is logged in and phone matches
-    const sessionHeader = request.headers.get('x-user-phone');
-    if (!sessionHeader) {
+    // 验证用户登录
+    if (!userPhone || !isAuthenticated(userPhone)) {
       return NextResponse.json(
         { success: false, commandId: '', message: '未登录，请先登录' },
-        { status: 401 },
+        { status: 401 }
       );
     }
 
-    if (sessionHeader !== phone) {
+    // 验证用户只能操作自己的设备
+    if (userPhone !== phone) {
       return NextResponse.json(
-        { success: false, commandId: '', message: '无权操作此设备，登录手机号与目标设备不一致' },
-        { status: 403 },
+        { success: false, commandId: '', message: '无权操作其他用户的设备' },
+        { status: 403 }
       );
     }
 
-    // Rate limiting
-    const rateLimit = checkRateLimit(`command:${phone}`, RATE_LIMITS.COMMAND_CREATE);
-    if (!rateLimit.allowed) {
+    // 参数验证
+    if (!phone || !type) {
+      return NextResponse.json(
+        { success: false, commandId: '', message: '缺少必填参数' },
+        { status: 400 }
+      );
+    }
+
+    if (!['bolus', 'carbs'].includes(type)) {
+      return NextResponse.json(
+        { success: false, commandId: '', message: '命令类型无效' },
+        { status: 400 }
+      );
+    }
+
+    // 验证设备已注册
+    const device = getDevice(phone);
+    if (!device) {
+      return NextResponse.json(
+        { success: false, commandId: '', message: '设备未注册' },
+        { status: 404 }
+      );
+    }
+
+    // 剂量验证
+    if (type === 'bolus') {
+      if (!insulin || insulin <= 0 || insulin > SAFETY_RULES.MAX_BOLUS_UNITS) {
+        return NextResponse.json(
+          { success: false, commandId: '', message: `胰岛素剂量必须在 0-${SAFETY_RULES.MAX_BOLUS_UNITS}U 之间` },
+          { status: 400 }
+        );
+      }
+    } else if (type === 'carbs') {
+      if (!carbs || carbs <= 0 || carbs > SAFETY_RULES.MAX_CARBS_GRAMS) {
+        return NextResponse.json(
+          { success: false, commandId: '', message: `碳水剂量必须在 0-${SAFETY_RULES.MAX_CARBS_GRAMS}g 之间` },
+          { status: 400 }
+        );
+      }
+    }
+
+    // 速率限制
+    const rateLimitKey = `command:${userPhone}`;
+    if (!checkRateLimit(rateLimitKey, 10, 60000)) {
       return NextResponse.json(
         { success: false, commandId: '', message: '请求过于频繁，请稍后再试' },
-        { status: 429 },
+        { status: 429 }
       );
     }
 
-    // Check device is online
-    const deviceStatus = getDeviceStatus(phone);
-    if (deviceStatus === 'not_registered') {
-      return NextResponse.json(
-        { success: false, commandId: '', message: '设备未注册，请先在 AndroidAPS 手机上安装并启动远程插件' },
-        { status: 400 },
-      );
-    }
-    if (deviceStatus === 'offline') {
-      return NextResponse.json(
-        { success: false, commandId: '', message: '设备离线，请确保 AndroidAPS 手机已联网并启动远程插件' },
-        { status: 400 },
-      );
-    }
-
-    // Safety checks
-    if (type === 'bolus' || type === 'mixed') {
-      if (!insulin || insulin <= 0) {
-        return NextResponse.json(
-          { success: false, commandId: '', message: '胰岛素剂量必须大于 0' },
-          { status: 400 },
-        );
-      }
-      if (insulin > SAFETY_RULES.MAX_BOLUS_UNITS) {
-        return NextResponse.json(
-          { success: false, commandId: '', message: `胰岛素剂量不能超过 ${SAFETY_RULES.MAX_BOLUS_UNITS}U` },
-          { status: 400 },
-        );
-      }
-    }
-
-    if (type === 'carbs' || type === 'mixed') {
-      if (!carbs || carbs <= 0) {
-        return NextResponse.json(
-          { success: false, commandId: '', message: '碳水剂量必须大于 0' },
-          { status: 400 },
-        );
-      }
-      if (carbs > SAFETY_RULES.MAX_CARBS_GRAMS) {
-        return NextResponse.json(
-          { success: false, commandId: '', message: `碳水剂量不能超过 ${SAFETY_RULES.MAX_CARBS_GRAMS}g` },
-          { status: 400 },
-        );
-      }
-    }
-
+    // 创建命令
     const command = createCommand(phone, type, insulin, carbs);
 
-    const response: CreateCommandResponse = {
+    return NextResponse.json({
       success: true,
       commandId: command.id,
-      message: `命令已创建，等待设备执行`,
-    };
-
-    return NextResponse.json(response);
+      message: '命令已创建，等待设备执行',
+    });
   } catch (error) {
-    console.error('[Command Create] Error:', error);
+    console.error('Command create error:', error);
     return NextResponse.json(
-      { success: false, commandId: '', message: '命令创建失败' },
-      { status: 500 },
+      { success: false, commandId: '', message: '服务器内部错误' },
+      { status: 500 }
     );
   }
 }

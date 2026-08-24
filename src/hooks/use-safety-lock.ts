@@ -1,178 +1,97 @@
-import { useState, useCallback, useEffect } from 'react';
-import { SafetyLock, SAFETY_RULES } from '@/lib/types';
+'use client';
+
+import { useState, useEffect, useCallback } from 'react';
+import { SAFETY_RULES } from '@/lib/types';
+
+interface SafetyLockState {
+  insulinUntil: number;
+  carbsUntil: number;
+}
 
 const STORAGE_KEY = 'aaps-safety-lock';
 
-function loadSafetyLock(): SafetyLock {
+function loadSafetyLock(): SafetyLockState {
   if (typeof window === 'undefined') {
-    return {
-      insulinLockedUntil: null,
-      carbsLockedUntil: null,
-      lastBolusTime: null,
-      lastCarbsTime: null,
-    };
+    return { insulinUntil: 0, carbsUntil: 0 };
   }
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
       return JSON.parse(stored);
     }
-  } catch {
-    // ignore
-  }
-  return {
-    insulinLockedUntil: null,
-    carbsLockedUntil: null,
-    lastBolusTime: null,
-    lastCarbsTime: null,
-  };
+  } catch {}
+  return { insulinUntil: 0, carbsUntil: 0 };
 }
 
-function saveSafetyLock(lock: SafetyLock) {
+function saveSafetyLock(state: SafetyLockState) {
   if (typeof window === 'undefined') return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(lock));
-  } catch {
-    // ignore
-  }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {}
 }
 
 export function useSafetyLock() {
-  const [lock, setLock] = useState<SafetyLock>(() => loadSafetyLock());
-  const [insulinCountdown, setInsulinCountdown] = useState(0);
-  const [carbsCountdown, setCarbsCountdown] = useState(0);
+  const [lockState, setLockState] = useState<SafetyLockState>({ insulinUntil: 0, carbsUntil: 0 });
+  const [now, setNow] = useState(0);
+  const [initialized, setInitialized] = useState(false);
 
+  // 初始化时从 localStorage 加载
   useEffect(() => {
-    const interval = setInterval(() => {
-      const now = Date.now();
-      setLock((prev) => {
-        const updated = { ...prev };
-        if (prev.insulinLockedUntil && now >= prev.insulinLockedUntil) {
-          updated.insulinLockedUntil = null;
-        }
-        if (prev.carbsLockedUntil && now >= prev.carbsLockedUntil) {
-          updated.carbsLockedUntil = null;
-        }
-        if (updated !== prev) {
-          saveSafetyLock(updated);
-        }
-        return updated;
-      });
-
-      setInsulinCountdown((prev) => {
-        if (prev > 0) return prev - 1;
-        return 0;
-      });
-      setCarbsCountdown((prev) => {
-        if (prev > 0) return prev - 1;
-        return 0;
-      });
-    }, 1000);
-
-    return () => clearInterval(interval);
+    setLockState(loadSafetyLock());
+    setNow(Date.now());
+    setInitialized(true);
   }, []);
 
+  // 每秒更新当前时间
   useEffect(() => {
-    const now = Date.now();
-    if (lock.insulinLockedUntil && lock.insulinLockedUntil > now) {
-      setInsulinCountdown(
-        Math.ceil((lock.insulinLockedUntil - now) / 1000)
-      );
-    } else {
-      setInsulinCountdown(0);
-    }
-    if (lock.carbsLockedUntil && lock.carbsLockedUntil > now) {
-      setCarbsCountdown(
-        Math.ceil((lock.carbsLockedUntil - now) / 1000)
-      );
-    } else {
-      setCarbsCountdown(0);
-    }
-  }, [lock]);
+    if (!initialized) return;
+    const timer = setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [initialized]);
+
+  const isInsulinLocked = now < lockState.insulinUntil;
+  const isCarbsLocked = now < lockState.carbsUntil;
+
+  const insulinCountdown = isInsulinLocked
+    ? Math.ceil((lockState.insulinUntil - now) / 1000)
+    : 0;
+  const carbsCountdown = isCarbsLocked
+    ? Math.ceil((lockState.carbsUntil - now) / 1000)
+    : 0;
 
   const recordBolus = useCallback(() => {
-    const now = Date.now();
-    const lockedUntil =
-      now + SAFETY_RULES.INSULIN_LOCK_MINUTES * 60 * 1000;
-    const newLock: SafetyLock = {
-      insulinLockedUntil: lockedUntil,
-      carbsLockedUntil: lock.carbsLockedUntil,
-      lastBolusTime: now,
-      lastCarbsTime: lock.lastCarbsTime,
+    const newLock = {
+      ...lockState,
+      insulinUntil: Date.now() + SAFETY_RULES.INSULIN_LOCK_MINUTES * 60 * 1000,
     };
-    setLock(newLock);
+    setLockState(newLock);
     saveSafetyLock(newLock);
-    setInsulinCountdown(SAFETY_RULES.INSULIN_LOCK_MINUTES * 60);
-  }, [lock]);
+  }, [lockState]);
 
   const recordCarbs = useCallback(() => {
-    const now = Date.now();
-    const lockedUntil =
-      now + SAFETY_RULES.CARBS_LOCK_MINUTES * 60 * 1000;
-    const newLock: SafetyLock = {
-      insulinLockedUntil: lock.insulinLockedUntil,
-      carbsLockedUntil: lockedUntil,
-      lastBolusTime: lock.lastBolusTime,
-      lastCarbsTime: now,
+    const newLock = {
+      ...lockState,
+      carbsUntil: Date.now() + SAFETY_RULES.CARBS_LOCK_MINUTES * 60 * 1000,
     };
-    setLock(newLock);
+    setLockState(newLock);
     saveSafetyLock(newLock);
-    setCarbsCountdown(SAFETY_RULES.CARBS_LOCK_MINUTES * 60);
-  }, [lock]);
+  }, [lockState]);
 
-  const [isInsulinLocked, setIsInsulinLocked] = useState(false);
-  const [isCarbsLocked, setIsCarbsLocked] = useState(false);
-
-  useEffect(() => {
-    const now = Date.now();
-    const insulinLocked = lock.insulinLockedUntil !== null && lock.insulinLockedUntil > now;
-    const carbsLocked = lock.carbsLockedUntil !== null && lock.carbsLockedUntil > now;
-    setIsInsulinLocked(insulinLocked);
-    setIsCarbsLocked(carbsLocked);
-    if (lock.insulinLockedUntil && lock.insulinLockedUntil > now) {
-      setInsulinCountdown(Math.ceil((lock.insulinLockedUntil - now) / 1000));
-    } else {
-      setInsulinCountdown(0);
-    }
-    if (lock.carbsLockedUntil && lock.carbsLockedUntil > now) {
-      setCarbsCountdown(Math.ceil((lock.carbsLockedUntil - now) / 1000));
-    } else {
-      setCarbsCountdown(0);
-    }
-  }, [lock]);
-
-  const resetLock = useCallback(() => {
-    const newLock: SafetyLock = {
-      insulinLockedUntil: null,
-      carbsLockedUntil: null,
-      lastBolusTime: null,
-      lastCarbsTime: null,
-    };
-    setLock(newLock);
+  const clearLock = useCallback(() => {
+    const newLock = { insulinUntil: 0, carbsUntil: 0 };
+    setLockState(newLock);
     saveSafetyLock(newLock);
-    setInsulinCountdown(0);
-    setCarbsCountdown(0);
   }, []);
 
   return {
-    lock,
     isInsulinLocked,
     isCarbsLocked,
     insulinCountdown,
     carbsCountdown,
     recordBolus,
     recordCarbs,
-    resetLock,
+    clearLock,
   };
 }
-
-function formatCountdown(seconds: number): string {
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  if (mins > 0) {
-    return `${mins}分${secs.toString().padStart(2, '0')}秒`;
-  }
-  return `${secs}秒`;
-}
-
-export { formatCountdown };

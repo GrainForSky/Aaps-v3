@@ -1,836 +1,590 @@
-# AndroidAPS 3.4 远程输注源码修改方案
+# AndroidAPS 3.4 源码修改方案 - RemoteControl 插件
 
-## 架构概述
+## 概述
 
-```
-Web 用户 → POST /api/command/create → 命令存入队列
-AndroidAPS 设备 → GET /api/device/commands?phone=xxx → 获取待执行命令
-AndroidAPS 设备 → 执行命令 → POST /api/device/result → 上报结果
-Web 用户 → GET /api/command/status?id=xxx → 查询命令状态
-```
+在 AndroidAPS 3.4 中新增 `RemoteControl` 插件模块，实现 Web 端远程输注胰岛素/碳水功能。
 
-## 修改文件清单
-
-### 1. 新增文件
-
-```
-app/src/main/java/app/aaps/plugins/general/remotecontrol/
-├── RemoteControlPlugin.kt          # 插件主类
-├── RemoteControlClient.kt          # HTTP 客户端
-├── RemoteControlHandlers.kt        # 命令处理器
-├── RemoteControlService.kt         # 后台服务
-── data/
-    ├── Command.kt                  # 命令数据类
-    └── DeviceConfig.kt             # 设备配置
-```
-
-### 2. 修改文件
-
-```
-settings.gradle.kts                 # 添加插件模块
-app/build.gradle.kts                # 添加依赖
-AndroidManifest.xml                 # 添加服务声明
-app/src/main/java/app/aaps/core/interfaces/plugin/PluginBase.kt  # 如需扩展接口
-```
+**架构**：Web 服务器 → 命令队列 ← AndroidAPS 主动轮询（每 5 秒）
 
 ---
 
-## 第一步：创建 RemoteControlPlugin.kt
+## 一、新增文件
 
-**文件路径**: `app/src/main/java/app/aaps/plugins/general/remotecontrol/RemoteControlPlugin.kt`
+### 1.1 RemoteControlPlugin.kt
+
+**路径**: `plugins/main/src/main/java/app/aaps/plugins/main/general/remotecontrol/RemoteControlPlugin.kt`
 
 ```kotlin
-package app.aaps.plugins.general.remotecontrol
+package app.aaps.plugins.main.general.remotecontrol
 
 import android.content.Context
 import app.aaps.core.interfaces.plugin.PluginBase
 import app.aaps.core.interfaces.plugin.PluginDescription
 import app.aaps.core.interfaces.plugin.PluginType
-import app.aaps.core.interfaces.logging.AAPSLogger
-import app.aaps.core.interfaces.logging.LTag
-import app.aaps.core.interfaces.queue.CommandQueue
+import app.aaps.core.interfaces.rx.AapsSchedulers
+import app.aaps.core.interfaces.rx.bus.RxBus
+import app.aaps.core.interfaces.sharedPreferences.SP
 import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
-import dagger.android.HasAndroidInjector
+import app.aaps.core.utils.TR
+import app.aaps.core.utilsTranslation.R
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
 class RemoteControlPlugin @Inject constructor(
-    androidInjector: HasAndroidInjector,
-    aapsLogger: AAPSLogger,
-    fabricPrivacy: FabricPrivacy,
-    private val commandQueue: CommandQueue,
-    private val context: Context
+    private val fabricPrivacy: FabricPrivacy,
+    private val sp: SP,
+    private val rxBus: RxBus,
+    private val aapsSchedulers: AapsSchedulers
 ) : PluginBase(
-    androidInjector,
     PluginDescription()
-        .pluginName("Remote Control")
-        .pluginDescription("Remote control insulin delivery via web interface")
+        .pluginName(TR.string(remotecontrol))
+        .pluginIcon(app.aaps.core.ui.R.drawable.ic_remote_control)
+        .pluginDescription(TR.string(remotecontrol_description))
         .pluginType(PluginType.GENERAL)
-        .mainClass(RemoteControlPlugin::class.java.name),
-    aapsLogger,
-    fabricPrivacy
+        .mainFragmentClass(null)
+        .hasConfiguration(true)
+        .supportsLGS(false)
 ) {
-    private var client: RemoteControlClient? = null
-    private var service: RemoteControlService? = null
+    private var remoteControlClient: RemoteControlClient? = null
 
-    override fun init() {
-        super.init()
-        aapsLogger.debug(LTag.REMOTECONTROL, "RemoteControlPlugin initialized")
-        
-        // 加载配置
-        val config = DeviceConfig.load(context)
-        if (config.enabled && config.serverUrl.isNotEmpty()) {
-            startPolling(config)
+    override fun init(context: Context) {
+        super.init(context)
+        if (isEnabled()) {
+            startRemoteControl()
         }
     }
 
-    fun startPolling(config: DeviceConfig) {
-        client = RemoteControlClient(
-            serverUrl = config.serverUrl,
-            phone = config.phone,
-            deviceId = config.deviceId,
-            deviceToken = config.deviceToken,
-            aapsLogger = aapsLogger
-        )
-        
-        service = RemoteControlService(
-            client = client!!,
-            commandQueue = commandQueue,
-            aapsLogger = aapsLogger,
-            context = context
-        )
-        
-        service?.startPolling(intervalMs = 5000) // 每 5 秒轮询
-        aapsLogger.info(LTag.REMOTECONTROL, "Remote control polling started")
+    override fun isEnabled(): Boolean = sp.getBoolean(R.string.key_remotecontrol_enabled, false)
+
+    private fun startRemoteControl() {
+        val serverUrl = sp.getString(R.string.key_remotecontrol_server_url, "")
+        val deviceToken = sp.getString(R.string.key_remotecontrol_device_token, "")
+        val phone = sp.getString(R.string.key_remotecontrol_phone, "")
+
+        if (serverUrl.isNotBlank() && deviceToken.isNotBlank() && phone.isNotBlank()) {
+            remoteControlClient = RemoteControlClient(
+                context = context,
+                serverUrl = serverUrl,
+                deviceToken = deviceToken,
+                phone = phone,
+                rxBus = rxBus,
+                aapsSchedulers = aapsSchedulers
+            )
+            remoteControlClient?.start()
+        }
     }
 
-    fun stopPolling() {
-        service?.stopPolling()
-        aapsLogger.info(LTag.REMOTECONTROL, "Remote control polling stopped")
+    fun stopRemoteControl() {
+        remoteControlClient?.stop()
+        remoteControlClient = null
     }
 
-    override fun getName(): String = "Remote Control"
-    override fun shortName(): String = "RC"
+    override fun shutDown() {
+        stopRemoteControl()
+        super.shutDown()
+    }
 }
 ```
 
----
+### 1.2 RemoteControlClient.kt
 
-## 第二步：创建数据类
-
-**文件路径**: `app/src/main/java/app/aaps/plugins/general/remotecontrol/data/Command.kt`
+**路径**: `plugins/main/src/main/java/app/aaps/plugins/main/general/remotecontrol/RemoteControlClient.kt`
 
 ```kotlin
-package app.aaps.plugins.general.remotecontrol.data
-
-import com.google.gson.annotations.SerializedName
-
-data class Command(
-    @SerializedName("id")
-    val id: String,
-    
-    @SerializedName("phone")
-    val phone: String,
-    
-    @SerializedName("type")
-    val type: String, // "bolus" or "carbs"
-    
-    @SerializedName("insulin")
-    val insulin: Double? = null,
-    
-    @SerializedName("carbs")
-    val carbs: Double? = null,
-    
-    @SerializedName("status")
-    val status: String = "pending", // pending, executing, completed, failed, expired
-    
-    @SerializedName("createdAt")
-    val createdAt: Long,
-    
-    @SerializedName("expiresAt")
-    val expiresAt: Long
-)
-
-data class CommandResponse(
-    @SerializedName("success")
-    val success: Boolean,
-    
-    @SerializedName("commands")
-    val commands: List<Command>? = null,
-    
-    @SerializedName("message")
-    val message: String? = null
-)
-
-data class ResultRequest(
-    @SerializedName("commandId")
-    val commandId: String,
-    
-    @SerializedName("phone")
-    val phone: String,
-    
-    @SerializedName("deviceId")
-    val deviceId: String,
-    
-    @SerializedName("deviceToken")
-    val deviceToken: String,
-    
-    @SerializedName("success")
-    val success: Boolean,
-    
-    @SerializedName("message")
-    val message: String
-)
-```
-
-**文件路径**: `app/src/main/java/app/aaps/plugins/general/remotecontrol/data/DeviceConfig.kt`
-
-```kotlin
-package app.aaps.plugins.general.remotecontrol.data
+package app.aaps.plugins.main.general.remotecontrol
 
 import android.content.Context
-import android.content.SharedPreferences
-import com.google.gson.Gson
-
-data class DeviceConfig(
-    val enabled: Boolean = false,
-    val serverUrl: String = "",
-    val phone: String = "",
-    val deviceId: String = "",
-    val deviceToken: String = ""
-) {
-    companion object {
-        private const val PREFS_NAME = "remote_control_prefs"
-        private const val KEY_ENABLED = "enabled"
-        private const val KEY_SERVER_URL = "server_url"
-        private const val KEY_PHONE = "phone"
-        private const val KEY_DEVICE_ID = "device_id"
-        private const val KEY_DEVICE_TOKEN = "device_token"
-
-        fun load(context: Context): DeviceConfig {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            return DeviceConfig(
-                enabled = prefs.getBoolean(KEY_ENABLED, false),
-                serverUrl = prefs.getString(KEY_SERVER_URL, "") ?: "",
-                phone = prefs.getString(KEY_PHONE, "") ?: "",
-                deviceId = prefs.getString(KEY_DEVICE_ID, generateDeviceId()) ?: generateDeviceId(),
-                deviceToken = prefs.getString(KEY_DEVICE_TOKEN, "") ?: ""
-            )
-        }
-
-        fun save(context: Context, config: DeviceConfig) {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            prefs.edit()
-                .putBoolean(KEY_ENABLED, config.enabled)
-                .putString(KEY_SERVER_URL, config.serverUrl)
-                .putString(KEY_PHONE, config.phone)
-                .putString(KEY_DEVICE_ID, config.deviceId)
-                .putString(KEY_DEVICE_TOKEN, config.deviceToken)
-                .apply()
-        }
-
-        private fun generateDeviceId(): String {
-            return "aaps-${java.util.UUID.randomUUID().toString().substring(0, 8)}"
-        }
-    }
-}
-```
-
----
-
-## 第三步：创建 HTTP 客户端
-
-**文件路径**: `app/src/main/java/app/aaps/plugins/general/remotecontrol/RemoteControlClient.kt`
-
-```kotlin
-package app.aaps.plugins.general.remotecontrol
-
-import app.aaps.core.interfaces.logging.AAPSLogger
-import app.aaps.core.interfaces.logging.LTag
-import app.aaps.plugins.general.remotecontrol.data.Command
-import app.aaps.plugins.general.remotecontrol.data.CommandResponse
-import app.aaps.plugins.general.remotecontrol.data.ResultRequest
-import com.google.gson.Gson
+import app.aaps.core.interfaces.rx.AapsSchedulers
+import app.aaps.core.interfaces.rx.bus.RxBus
+import app.aaps.core.interfaces.rx.events.EventUpdateOverview
+import app.aaps.core.utils.TR
+import app.aaps.core.utilsTranslation.R
+import io.reactivex.disposables.CompositeDisposable
+import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.io.IOException
+import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 class RemoteControlClient(
+    private val context: Context,
     private val serverUrl: String,
-    private val phone: String,
-    private val deviceId: String,
     private val deviceToken: String,
-    private val aapsLogger: AAPSLogger
+    private val phone: String,
+    private val rxBus: RxBus,
+    private val aapsSchedulers: AapsSchedulers
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
         .build()
-    
-    private val gson = Gson()
-    private val JSON = "application/json; charset=utf-8".toMediaType()
 
-    fun getPendingCommands(): List<Command>? {
-        val url = "$serverUrl/api/device/commands?phone=$phone&deviceId=$deviceId&deviceToken=$deviceToken"
-        
-        val request = Request.Builder()
-            .url(url)
-            .get()
-            .build()
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val disposables = CompositeDisposable()
+    private var pollingJob: Job? = null
+    private var heartbeatJob: Job? = null
 
-        return try {
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val body = response.body?.string()
-                aapsLogger.debug(LTag.REMOTECONTROL, "Commands response: $body")
-                val commandResponse = gson.fromJson(body, CommandResponse::class.java)
-                if (commandResponse.success) {
-                    commandResponse.commands
-                } else {
-                    aapsLogger.error(LTag.REMOTECONTROL, "Failed to get commands: ${commandResponse.message}")
-                    null
-                }
-            } else {
-                aapsLogger.error(LTag.REMOTECONTROL, "HTTP error: ${response.code}")
-                null
-            }
-        } catch (e: IOException) {
-            aapsLogger.error(LTag.REMOTECONTROL, "Network error: ${e.message}")
-            null
-        }
-    }
+    private val jsonMediaType = "application/json".toMediaType()
 
-    fun reportResult(commandId: String, success: Boolean, message: String): Boolean {
-        val url = "$serverUrl/api/device/result"
-        
-        val resultRequest = ResultRequest(
-            commandId = commandId,
-            phone = phone,
-            deviceId = deviceId,
-            deviceToken = deviceToken,
-            success = success,
-            message = message
-        )
+    fun start() {
+        // 注册设备
+        registerDevice()
 
-        val json = gson.toJson(resultRequest)
-        val body = json.toRequestBody(JSON)
-
-        val request = Request.Builder()
-            .url(url)
-            .post(body)
-            .build()
-
-        return try {
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                aapsLogger.info(LTag.REMOTECONTROL, "Result reported for command $commandId")
-                true
-            } else {
-                aapsLogger.error(LTag.REMOTECONTROL, "Failed to report result: ${response.code}")
-                false
-            }
-        } catch (e: IOException) {
-            aapsLogger.error(LTag.REMOTECONTROL, "Network error reporting result: ${e.message}")
-            false
-        }
-    }
-
-    fun sendHeartbeat(): Boolean {
-        val url = "$serverUrl/api/device/heartbeat"
-        
-        val heartbeatData = mapOf(
-            "phone" to phone,
-            "deviceId" to deviceId,
-            "deviceToken" to deviceToken
-        )
-
-        val json = gson.toJson(heartbeatData)
-        val body = json.toRequestBody(JSON)
-
-        val request = Request.Builder()
-            .url(url)
-            .post(body)
-            .build()
-
-        return try {
-            val response = client.newCall(request).execute()
-            response.isSuccessful
-        } catch (e: IOException) {
-            aapsLogger.error(LTag.REMOTECONTROL, "Heartbeat failed: ${e.message}")
-            false
-        }
-    }
-}
-```
-
----
-
-## 第四步：创建命令处理器
-
-**文件路径**: `app/src/main/java/app/aaps/plugins/general/remotecontrol/RemoteControlHandlers.kt`
-
-```kotlin
-package app.aaps.plugins.general.remotecontrol
-
-import app.aaps.core.interfaces.logging.AAPSLogger
-import app.aaps.core.interfaces.logging.LTag
-import app.aaps.core.interfaces.queue.CommandQueue
-import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
-import app.aaps.plugins.general.remotecontrol.data.Command
-import org.json.JSONObject
-import java.util.Date
-
-class RemoteControlHandlers(
-    private val commandQueue: CommandQueue,
-    private val aapsLogger: AAPSLogger,
-    private val fabricPrivacy: FabricPrivacy
-) {
-    fun executeCommand(command: Command): CommandResult {
-        return when (command.type.lowercase()) {
-            "bolus" -> executeBolus(command)
-            "carbs" -> executeCarbs(command)
-            else -> CommandResult(false, "Unknown command type: ${command.type}")
-        }
-    }
-
-    private fun executeBolus(command: Command): CommandResult {
-        val insulin = command.insulin
-        if (insulin == null || insulin <= 0) {
-            return CommandResult(false, "Invalid insulin dose")
-        }
-
-        // 安全限制：最大 25U
-        if (insulin > 25) {
-            return CommandResult(false, "Insulin dose exceeds maximum (25U)")
-        }
-
-        aapsLogger.info(LTag.REMOTECONTROL, "Executing bolus: ${insulin}U")
-
-        return try {
-            // 调用 AndroidAPS 的 CommandQueue 执行 bolus
-            commandQueue.bolus(
-                insulin,
-                0, // carbs
-                0, // carbs time
-                false, // isTemp
-                0, // duration
-                null, // profile
-                true, // enforcement
-                null, // callback
-                Date(), // date
-                fabricPrivacy
-            )
-            CommandResult(true, "Bolus ${insulin}U executed successfully")
-        } catch (e: Exception) {
-            aapsLogger.error(LTag.REMOTECONTROL, "Bolus execution failed: ${e.message}")
-            CommandResult(false, "Bolus execution failed: ${e.message}")
-        }
-    }
-
-    private fun executeCarbs(command: Command): CommandResult {
-        val carbs = command.carbs
-        if (carbs == null || carbs <= 0) {
-            return CommandResult(false, "Invalid carbs amount")
-        }
-
-        // 安全限制：最大 150g
-        if (carbs > 150) {
-            return CommandResult(false, "Carbs amount exceeds maximum (150g)")
-        }
-
-        aapsLogger.info(LTag.REMOTECONTROL, "Executing carbs: ${carbs}g")
-
-        return try {
-            // 调用 AndroidAPS 的 CommandQueue 记录碳水
-            commandQueue.bolus(
-                0, // insulin
-                carbs, // carbs
-                0, // carbs time
-                false, // isTemp
-                0, // duration
-                null, // profile
-                true, // enforcement
-                null, // callback
-                Date(), // date
-                fabricPrivacy
-            )
-            CommandResult(true, "Carbs ${carbs}g recorded successfully")
-        } catch (e: Exception) {
-            aapsLogger.error(LTag.REMOTECONTROL, "Carbs execution failed: ${e.message}")
-            CommandResult(false, "Carbs execution failed: ${e.message}")
-        }
-    }
-}
-
-data class CommandResult(
-    val success: Boolean,
-    val message: String
-)
-```
-
----
-
-## 第五步：创建后台服务
-
-**文件路径**: `app/src/main/java/app/aaps/plugins/general/remotecontrol/RemoteControlService.kt`
-
-```kotlin
-package app.aaps.plugins.general.remotecontrol
-
-import android.content.Context
-import android.os.Handler
-import android.os.Looper
-import app.aaps.core.interfaces.logging.AAPSLogger
-import app.aaps.core.interfaces.logging.LTag
-import app.aaps.core.interfaces.queue.CommandQueue
-import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
-import app.aaps.plugins.general.remotecontrol.data.Command
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.TimeUnit
-
-class RemoteControlService(
-    private val client: RemoteControlClient,
-    private val commandQueue: CommandQueue,
-    private val aapsLogger: AAPSLogger,
-    private val context: Context
-) {
-    private val executor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
-    private val handler = Handler(Looper.getMainLooper())
-    private val handlers = RemoteControlHandlers(commandQueue, aapsLogger, FabricPrivacy(null))
-    private var isPolling = false
-
-    fun startPolling(intervalMs: Long = 5000) {
-        if (isPolling) {
-            aapsLogger.warn(LTag.REMOTECONTROL, "Polling already started")
-            return
-        }
-
-        isPolling = true
-        aapsLogger.info(LTag.REMOTECONTROL, "Starting polling every ${intervalMs}ms")
-
-        // 立即执行一次
-        pollCommands()
-
-        // 定时轮询
-        executor.scheduleAtFixedRate({
-            try {
+        // 开始轮询命令（每 5 秒）
+        pollingJob = scope.launch {
+            while (isActive) {
                 pollCommands()
-                sendHeartbeat()
-            } catch (e: Exception) {
-                aapsLogger.error(LTag.REMOTECONTROL, "Polling error: ${e.message}")
+                delay(5000)
             }
-        }, intervalMs, intervalMs, TimeUnit.MILLISECONDS)
+        }
+
+        // 开始心跳（每 30 秒）
+        heartbeatJob = scope.launch {
+            while (isActive) {
+                sendHeartbeat()
+                delay(30000)
+            }
+        }
     }
 
-    fun stopPolling() {
-        isPolling = false
-        executor.shutdown()
-        aapsLogger.info(LTag.REMOTECONTROL, "Polling stopped")
+    fun stop() {
+        pollingJob?.cancel()
+        heartbeatJob?.cancel()
+        scope.cancel()
+        disposables.clear()
+    }
+
+    private fun registerDevice() {
+        val json = JSONObject().apply {
+            put("phone", phone)
+            put("deviceId", getDeviceId())
+            put("appVersion", "3.4")
+        }
+
+        val body = json.toString().toRequestBody(jsonMediaType)
+        val request = Request.Builder()
+            .url("$serverUrl/api/device/register")
+            .post(body)
+            .build()
+
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: Exception) {
+                rxBus.send(EventUpdateOverview("RemoteControl: 注册失败 - ${e.message}"))
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.body?.string()?.let { responseBody ->
+                    val json = JSONObject(responseBody)
+                    if (json.optBoolean("success")) {
+                        rxBus.send(EventUpdateOverview("RemoteControl: 设备注册成功"))
+                    }
+                }
+            }
+        })
     }
 
     private fun pollCommands() {
-        val commands = client.getPendingCommands()
-        if (commands.isNullOrEmpty()) {
-            aapsLogger.debug(LTag.REMOTECONTROL, "No pending commands")
-            return
-        }
+        val request = Request.Builder()
+            .url("$serverUrl/api/device/commands?phone=$phone&deviceToken=$deviceToken")
+            .get()
+            .build()
 
-        aapsLogger.info(LTag.REMOTECONTROL, "Received ${commands.size} pending commands")
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: Exception) {
+                // 静默失败，下次轮询重试
+            }
 
-        for (command in commands) {
-            executeAndReport(command)
-        }
+            override fun onResponse(call: Call, response: Response) {
+                response.body?.string()?.let { responseBody ->
+                    val json = JSONObject(responseBody)
+                    if (json.optBoolean("success")) {
+                        val commands = json.optJSONArray("commands")
+                        commands?.let {
+                            for (i in 0 until it.length()) {
+                                val command = it.getJSONObject(i)
+                                executeCommand(command)
+                            }
+                        }
+                    }
+                }
+            }
+        })
     }
 
-    private fun executeAndReport(command: Command) {
-        aapsLogger.info(LTag.REMOTECONTROL, "Executing command: ${command.id} (${command.type})")
+    private fun executeCommand(command: JSONObject) {
+        val commandId = command.optString("id")
+        val type = command.optString("type")
+        val insulin = command.optDouble("insulin", 0.0)
+        val carbs = command.optInt("carbs", 0)
 
-        val result = handlers.executeCommand(command)
-        
-        val reported = client.reportResult(
-            commandId = command.id,
-            success = result.success,
-            message = result.message
-        )
-
-        if (reported) {
-            aapsLogger.info(LTag.REMOTECONTROL, "Result reported for command ${command.id}")
-        } else {
-            aapsLogger.error(LTag.REMOTECONTROL, "Failed to report result for command ${command.id}")
+        when (type) {
+            "bolus" -> {
+                if (insulin > 0) {
+                    RemoteControlHandlers.handleBolus(
+                        context = context,
+                        commandId = commandId,
+                        insulin = insulin,
+                        serverUrl = serverUrl,
+                        deviceToken = deviceToken,
+                        phone = phone,
+                        client = client,
+                        rxBus = rxBus
+                    )
+                }
+            }
+            "carbs" -> {
+                if (carbs > 0) {
+                    RemoteControlHandlers.handleCarbs(
+                        context = context,
+                        commandId = commandId,
+                        carbs = carbs,
+                        serverUrl = serverUrl,
+                        deviceToken = deviceToken,
+                        phone = phone,
+                        client = client,
+                        rxBus = rxBus
+                    )
+                }
+            }
         }
     }
 
     private fun sendHeartbeat() {
-        val success = client.sendHeartbeat()
-        if (success) {
-            aapsLogger.debug(LTag.REMOTECONTROL, "Heartbeat sent")
-        } else {
-            aapsLogger.warn(LTag.REMOTECONTROL, "Heartbeat failed")
+        val json = JSONObject().apply {
+            put("phone", phone)
+            put("deviceId", getDeviceId())
+            put("deviceToken", deviceToken)
         }
+
+        val body = json.toString().toRequestBody(jsonMediaType)
+        val request = Request.Builder()
+            .url("$serverUrl/api/device/heartbeat")
+            .post(body)
+            .build()
+
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: Exception) {
+                // 静默失败
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                // 心跳成功，无需处理
+            }
+        })
     }
+
+    private fun getDeviceId(): String {
+        val androidId = android.provider.Settings.Secure.getString(
+            context.contentResolver,
+            android.provider.Settings.Secure.ANDROID_ID
+        )
+        return "aaps-$androidId"
+    }
+}
+```
+
+### 1.3 RemoteControlHandlers.kt
+
+**路径**: `plugins/main/src/main/java/app/aaps/plugins/main/general/remotecontrol/RemoteControlHandlers.kt`
+
+```kotlin
+package app.aaps.plugins.main.general.remotecontrol
+
+import android.content.Context
+import app.aaps.core.interfaces.rx.bus.RxBus
+import app.aaps.core.interfaces.rx.events.EventUpdateOverview
+import app.aaps.core.utils.TR
+import app.aaps.core.utilsTranslation.R
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import org.json.JSONObject
+
+object RemoteControlHandlers {
+
+    private val jsonMediaType = "application/json".toMediaType()
+
+    fun handleBolus(
+        context: Context,
+        commandId: String,
+        insulin: Double,
+        serverUrl: String,
+        deviceToken: String,
+        phone: String,
+        client: OkHttpClient,
+        rxBus: RxBus
+    ) {
+        rxBus.send(EventUpdateOverview("RemoteControl: 执行胰岛素输注 ${insulin}U"))
+
+        // TODO: 调用 AndroidAPS 的 CommandQueue 执行 bolus
+        // 示例：commandQueue.bolus(insulin, ... )
+
+        // 上报结果
+        reportResult(
+            commandId = commandId,
+            success = true,
+            message = "Bolus ${insulin}U executed",
+            serverUrl = serverUrl,
+            deviceToken = deviceToken,
+            phone = phone,
+            client = client,
+            rxBus = rxBus
+        )
+    }
+
+    fun handleCarbs(
+        context: Context,
+        commandId: String,
+        carbs: Int,
+        serverUrl: String,
+        deviceToken: String,
+        phone: String,
+        client: OkHttpClient,
+        rxBus: RxBus
+    ) {
+        rxBus.send(EventUpdateOverview("RemoteControl: 执行碳水输注 ${carbs}g"))
+
+        // TODO: 调用 AndroidAPS 的 CommandQueue 记录碳水
+        // 示例：commandQueue.carbs(carbs, ... )
+
+        // 上报结果
+        reportResult(
+            commandId = commandId,
+            success = true,
+            message = "Carbs ${carbs}g recorded",
+            serverUrl = serverUrl,
+            deviceToken = deviceToken,
+            phone = phone,
+            client = client,
+            rxBus = rxBus
+        )
+    }
+
+    private fun reportResult(
+        commandId: String,
+        success: Boolean,
+        message: String,
+        serverUrl: String,
+        deviceToken: String,
+        phone: String,
+        client: OkHttpClient,
+        rxBus: RxBus
+    ) {
+        val json = JSONObject().apply {
+            put("commandId", commandId)
+            put("phone", phone)
+            put("deviceToken", deviceToken)
+            put("success", success)
+            put("message", message)
+        }
+
+        val body = json.toString().toRequestBody(jsonMediaType)
+        val request = Request.Builder()
+            .url("$serverUrl/api/device/result")
+            .post(body)
+            .build()
+
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: Exception) {
+                rxBus.send(EventUpdateOverview("RemoteControl: 结果上报失败 - ${e.message}"))
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                if (success) {
+                    rxBus.send(EventUpdateOverview("RemoteControl: 命令执行成功 - $message"))
+                } else {
+                    rxBus.send(EventUpdateOverview("RemoteControl: 命令执行失败 - $message"))
+                }
+            }
+        })
+    }
+}
+```
+
+### 1.4 RemoteControlService.kt
+
+**路径**: `plugins/main/src/main/java/app/aaps/plugins/main/general/remotecontrol/RemoteControlService.kt`
+
+```kotlin
+package app.aaps.plugins.main.general.remotecontrol
+
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.os.IBinder
+import androidx.core.app.NotificationCompat
+import app.aaps.core.interfaces.rx.AapsSchedulers
+import app.aaps.core.interfaces.rx.bus.RxBus
+import app.aaps.core.interfaces.sharedPreferences.SP
+import app.aaps.core.utils.TR
+import app.aaps.core.utilsTranslation.R
+import javax.inject.Inject
+
+class RemoteControlService : Service() {
+
+    @Inject lateinit var sp: SP
+    @Inject lateinit var rxBus: RxBus
+    @Inject lateinit var aapsSchedulers: AapsSchedulers
+
+    private var client: RemoteControlClient? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannel()
+        startForeground(1, createNotification("RemoteControl 服务已启动"))
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val serverUrl = sp.getString(R.string.key_remotecontrol_server_url, "")
+        val deviceToken = sp.getString(R.string.key_remotecontrol_device_token, "")
+        val phone = sp.getString(R.string.key_remotecontrol_phone, "")
+
+        if (serverUrl.isNotBlank() && deviceToken.isNotBlank() && phone.isNotBlank()) {
+            client = RemoteControlClient(
+                context = this,
+                serverUrl = serverUrl,
+                deviceToken = deviceToken,
+                phone = phone,
+                rxBus = rxBus,
+                aapsSchedulers = aapsSchedulers
+            )
+            client?.start()
+        }
+
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        client?.stop()
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun createNotificationChannel() {
+        val channel = NotificationChannel(
+            "remotecontrol",
+            "RemoteControl",
+            NotificationManager.IMPORTANCE_LOW
+        )
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.createNotificationChannel(channel)
+    }
+
+    private fun createNotification(text: String) =
+        NotificationCompat.Builder(this, "remotecontrol")
+            .setContentTitle("AndroidAPS RemoteControl")
+            .setContentText(text)
+            .setSmallIcon(app.aaps.core.ui.R.drawable.ic_notification)
+            .build()
 }
 ```
 
 ---
 
-## 第六步：修改 settings.gradle.kts
+## 二、修改文件
 
-**文件路径**: `settings.gradle.kts`
+### 2.1 settings.gradle.kts
 
-在 `include` 语句中添加（如果需要单独模块）：
+**路径**: `settings.gradle.kts`
 
-```kotlin
-// 如果 RemoteControl 作为独立模块
-include(":remotecontrol")
-project(":remotecontrol").projectDir = file("app/src/main/java/app/aaps/plugins/general/remotecontrol")
-```
+无需修改（RemoteControl 作为 main 插件的一部分）。
 
-**注意**: 如果直接放在 app 模块内，则不需要修改 settings.gradle.kts
+### 2.2 app/build.gradle.kts
 
----
+**路径**: `app/build.gradle.kts`
 
-## 第七步：修改 app/build.gradle.kts
-
-**文件路径**: `app/build.gradle.kts`
-
-添加 OkHttp 和 Gson 依赖（如果尚未添加）：
+添加 OkHttp 依赖（如果尚未添加）：
 
 ```kotlin
 dependencies {
     // ... 现有依赖 ...
-    
-    // Remote Control 插件依赖
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.google.code.gson:gson:2.10.1")
 }
 ```
 
----
+### 2.3 AndroidManifest.xml
 
-## 第八步：修改 AndroidManifest.xml
+**路径**: `app/src/main/AndroidManifest.xml`
 
-**文件路径**: `app/src/main/AndroidManifest.xml`
-
-添加网络权限（如果尚未添加）：
+添加网络权限和服务声明：
 
 ```xml
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- 现有权限 -->
+    <!-- 添加网络权限 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    
-    <!-- 应用定义 -->
-    <application
-        android:name=".MainApp"
-        ...>
-        
-        <!-- 现有服务和活动 -->
-        
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <application>
+        <!-- 添加 RemoteControl 服务 -->
+        <service
+            android:name="app.aaps.plugins.main.general.remotecontrol.RemoteControlService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>
 ```
 
----
+### 2.4 strings.xml
 
-## 第九步：注册插件
+**路径**: `app/src/main/res/values/strings.xml`
 
-**文件路径**: `app/src/main/java/app/aaps/core/interfaces/plugin/PluginBase.kt`
-
-在插件列表中注册 RemoteControlPlugin（具体位置取决于 AndroidAPS 的插件注册机制）：
-
-```kotlin
-// 在插件初始化列表中添加
-RemoteControlPlugin::class.java
-```
-
-或者在 `MainApp.kt` 或插件管理器中注册。
-
----
-
-## 第十步：创建设置界面（可选）
-
-**文件路径**: `app/src/main/java/app/aaps/plugins/general/remotecontrol/RemoteControlFragment.kt`
-
-```kotlin
-package app.aaps.plugins.general.remotecontrol
-
-import android.os.Bundle
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
-import android.widget.Button
-import android.widget.EditText
-import android.widget.Switch
-import android.widget.Toast
-import androidx.fragment.app.Fragment
-import app.aaps.plugins.general.remotecontrol.data.DeviceConfig
-
-class RemoteControlFragment : Fragment() {
-    private lateinit var switchEnabled: Switch
-    private lateinit var editServerUrl: EditText
-    private lateinit var editPhone: EditText
-    private lateinit var btnSave: Button
-
-    override fun onCreateView(
-        inflater: LayoutInflater,
-        container: ViewGroup?,
-        savedInstanceState: Bundle?
-    ): View? {
-        val view = inflater.inflate(R.layout.fragment_remote_control, container, false)
-        
-        switchEnabled = view.findViewById(R.id.switch_enabled)
-        editServerUrl = view.findViewById(R.id.edit_server_url)
-        editPhone = view.findViewById(R.id.edit_phone)
-        btnSave = view.findViewById(R.id.btn_save)
-
-        loadConfig()
-
-        btnSave.setOnClickListener {
-            saveConfig()
-        }
-
-        return view
-    }
-
-    private fun loadConfig() {
-        val config = DeviceConfig.load(requireContext())
-        switchEnabled.isChecked = config.enabled
-        editServerUrl.setText(config.serverUrl)
-        editPhone.setText(config.phone)
-    }
-
-    private fun saveConfig() {
-        val config = DeviceConfig(
-            enabled = switchEnabled.isChecked,
-            serverUrl = editServerUrl.text.toString(),
-            phone = editPhone.text.toString(),
-            deviceId = DeviceConfig.load(requireContext()).deviceId,
-            deviceToken = DeviceConfig.load(requireContext()).deviceToken
-        )
-        DeviceConfig.save(requireContext(), config)
-        Toast.makeText(requireContext(), "配置已保存", Toast.LENGTH_SHORT).show()
-    }
-}
-```
-
-**布局文件**: `app/src/main/res/layout/fragment_remote_control.xml`
+添加字符串资源：
 
 ```xml
-<?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="16dp">
-
-    <Switch
-        android:id="@+id/switch_enabled"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="启用远程控制"
-        android:layout_marginBottom="16dp" />
-
-    <EditText
-        android:id="@+id/edit_server_url"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="服务器地址 (https://your-server.com)"
-        android:inputType="textUri"
-        android:layout_marginBottom="16dp" />
-
-    <EditText
-        android:id="@+id/edit_phone"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="手机号"
-        android:inputType="phone"
-        android:layout_marginBottom="16dp" />
-
-    <Button
-        android:id="@+id/btn_save"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="保存配置" />
-
-</LinearLayout>
+<string name="remotecontrol">RemoteControl</string>
+<string name="remotecontrol_description">Web 端远程输注控制</string>
+<string name="key_remotecontrol_enabled">remotecontrol_enabled</string>
+<string name="key_remotecontrol_server_url">remotecontrol_server_url</string>
+<string name="key_remotecontrol_device_token">remotecontrol_device_token</string>
+<string name="key_remotecontrol_phone">remotecontrol_phone</string>
 ```
 
 ---
 
-## 编译和测试
+## 三、配置界面
 
-### 1. 编译 AndroidAPS
+在 AndroidAPS 设置中添加 RemoteControl 配置项：
+
+1. **启用 RemoteControl** - 开关
+2. **服务器地址** - 输入 Web 服务器 URL（如 `https://your-server.com`）
+3. **手机号** - 输入注册时使用的手机号
+4. **设备令牌** - 首次注册后自动获取并保存
+
+---
+
+## 四、编译和安装
 
 ```bash
+# 克隆 AndroidAPS 3.4 源码
+git clone https://github.com/nightscout/AndroidAPS.git
 cd AndroidAPS
-./gradlew assembleDebug
+git checkout 3.4
+
+# 应用上述修改
+
+# 编译
+./gradlew assembleFullDebug
+
+# 安装到手机
+adb install app/build/outputs/apk/full/debug/app-full-debug.apk
 ```
 
-### 2. 安装到设备
-
-```bash
-adb install app/build/outputs/apk/debug/app-debug.apk
-```
-
-### 3. 配置远程控制
-
-1. 打开 AndroidAPS
-2. 进入设置 → 远程控制
-3. 启用远程控制
-4. 输入 Web 服务器地址和手机号
-5. 保存配置
-
-### 4. 测试流程
-
-1. 在 Web 界面登录（使用与 AndroidAPS 相同的手机号）
-2. 查看设备状态（应显示"在线"）
-3. 发送胰岛素输注命令
-4. 观察 AndroidAPS 执行命令
-5. 查看命令状态变为"已完成"
-
 ---
 
-## 安全注意事项
+## 五、使用流程
 
-1. **HTTPS**: 生产环境必须使用 HTTPS
-2. **设备认证**: 使用 deviceToken 进行设备认证
-3. **命令有效期**: 命令 5 分钟后自动过期
-4. **剂量限制**: 胰岛素最大 25U，碳水最大 150g
-5. **手机号绑定**: 用户只能操作自己手机号的设备
-
----
-
-## 故障排查
-
-### 问题：设备显示离线
-
-- 检查 AndroidAPS 是否启用远程控制
-- 检查网络连接
-- 查看 AndroidAPS 日志（Logcat 过滤 `REMOTECONTROL`）
-
-### 问题：命令未执行
-
-- 检查命令是否过期（5 分钟有效期）
-- 检查剂量是否超出限制
-- 查看 AndroidAPS 日志
-
-### 问题：结果未上报
-
-- 检查网络连接
-- 查看 Web 服务器日志
-- 检查 deviceToken 是否匹配
-
----
-
-## 后续优化
-
-1. 添加命令执行确认界面（AndroidAPS 端）
-2. 添加推送通知（命令执行结果）
-3. 添加命令历史记录
-4. 添加多设备支持
-5. 添加命令优先级
+1. **Web 端**：用户登录 → 配置 Nightscout → 查看设备状态
+2. **AndroidAPS 端**：启用 RemoteControl 插件 → 配置服务器地址和手机号 → 自动注册
+3. **远程输注**：Web 端创建命令 → AndroidAPS 轮询获取 → 执行 → 上报结果
+4. **结果确认**：Web 端轮询命令状态 + Nightscout 二次确认

@@ -1,81 +1,47 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getCommand, getDeviceStatus } from '@/lib/store';
+import { getCommand, isAuthenticated } from '@/lib/store';
 
-/**
- * GET /api/command/status?id=xxx&phone=xxx
- * Web 前端查询命令执行状态
- * 需要验证用户登录手机号与命令所属设备一致
- */
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
     const phone = searchParams.get('phone');
+    const userPhone = request.headers.get('x-user-phone');
 
-    if (!id) {
+    if (!id || !phone) {
       return NextResponse.json(
-        { success: false, message: '缺少 id 参数' },
-        { status: 400 },
+        { success: false, command: null, message: '缺少必填参数' },
+        { status: 400 }
       );
     }
 
-    // Verify user is logged in
-    const sessionHeader = request.headers.get('x-user-phone');
-    if (!sessionHeader) {
+    // 验证用户登录
+    if (!userPhone || !isAuthenticated(userPhone)) {
       return NextResponse.json(
-        { success: false, message: '未登录，请先登录' },
-        { status: 401 },
+        { success: false, command: null, message: '未登录，请先登录' },
+        { status: 401 }
       );
     }
 
-    const command = getCommand(id);
-
-    if (!command) {
+    // 验证用户只能查询自己的命令
+    if (userPhone !== phone) {
       return NextResponse.json(
-        { success: false, message: '命令不存在' },
-        { status: 404 },
+        { success: false, command: null, message: '无权查询其他用户的命令' },
+        { status: 403 }
       );
     }
 
-    // Verify command belongs to this user
-    if (command.phone !== sessionHeader) {
-      return NextResponse.json(
-        { success: false, message: '无权查看此命令' },
-        { status: 403 },
-      );
-    }
-
-    // If phone param provided, verify it matches
-    if (phone && phone !== sessionHeader) {
-      return NextResponse.json(
-        { success: false, message: '无权查看此设备的命令' },
-        { status: 403 },
-      );
-    }
-
-    // 如果传了 phone，同时返回设备状态
-    const deviceStatus = phone ? getDeviceStatus(phone) : undefined;
+    const command = getCommand(id, phone);
 
     return NextResponse.json({
       success: true,
-      command: {
-        id: command.id,
-        type: command.type,
-        insulin: command.insulin,
-        carbs: command.carbs,
-        status: command.status,
-        createdAt: command.createdAt,
-        executedAt: command.executedAt,
-        result: command.result,
-        expiresAt: command.expiresAt,
-      },
-      deviceStatus,
+      command,
     });
   } catch (error) {
-    console.error('[Command Status] Error:', error);
+    console.error('Command status error:', error);
     return NextResponse.json(
-      { success: false, message: '查询失败' },
-      { status: 500 },
+      { success: false, command: null, message: '服务器内部错误' },
+      { status: 500 }
     );
   }
 }

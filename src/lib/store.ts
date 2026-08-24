@@ -1,212 +1,232 @@
-// ============================================================
-// In-Memory Command Store & Device Registry
-// ============================================================
-// In production, replace with database (Supabase/PostgreSQL)
-// ============================================================
+// ============================================
+// AndroidAPS Remote Control - In-Memory Store
+// ============================================
 
-import type {
+import {
   DeviceInfo,
-  RemoteCommand,
-  CommandStatus,
-  RateLimitEntry,
-} from '@/lib/types';
-import { RATE_LIMITS } from '@/lib/types';
-import crypto from 'crypto';
+  Command,
+  User,
+  SAFETY_RULES,
+} from './types';
 
-// --- Device Registry ---
-const deviceRegistry = new Map<string, DeviceInfo>();
-// Token -> phone:deviceId mapping for fast lookup
-const tokenToDevice = new Map<string, string>();
+// 设备注册表
+const devices = new Map<string, DeviceInfo>();
 
-/**
- * Generate a secure device token
- */
-export function generateDeviceToken(): string {
-  return crypto.randomBytes(32).toString('hex');
-}
+// 命令队列
+const commands = new Map<string, Command>();
 
-/**
- * Register a device and return device token
- */
-export function registerDevice(phone: string, deviceId: string, appVersion: string): DeviceInfo & { deviceToken: string } {
-  const key = `${phone}:${deviceId}`;
+// 登录用户
+const users = new Map<string, User>();
+
+// 速率限制记录
+const rateLimits = new Map<string, number[]>();
+
+// ============================================
+// 设备管理
+// ============================================
+
+export function registerDevice(
+  phone: string,
+  deviceId: string,
+  appVersion: string
+): { deviceToken: string; message: string } {
+  const deviceToken = generateDeviceToken(phone, deviceId);
   const now = Date.now();
-  const existing = deviceRegistry.get(key);
-  const deviceToken = existing?.deviceToken ?? generateDeviceToken();
-  const device: DeviceInfo = {
+
+  devices.set(phone, {
     phone,
     deviceId,
     deviceToken,
     appVersion,
-    registeredAt: existing?.registeredAt ?? now,
     lastHeartbeat: now,
-    status: 'online',
-  };
-  deviceRegistry.set(key, device);
-  tokenToDevice.set(deviceToken, key);
-  return { ...device, deviceToken };
+    registeredAt: now,
+  });
+
+  return { deviceToken, message: `设备 ${deviceId} 注册成功` };
 }
 
-/**
- * Validate device token and return device info
- */
-export function validateDeviceToken(deviceToken: string): DeviceInfo | null {
-  const key = tokenToDevice.get(deviceToken);
-  if (!key) return null;
-  const device = deviceRegistry.get(key);
-  if (!device) return null;
-  // Token must match
-  if (device.deviceToken !== deviceToken) return null;
-  return device;
-}
+export function updateHeartbeat(
+  phone: string,
+  deviceId: string,
+  deviceToken: string
+): boolean {
+  const device = devices.get(phone);
+  if (!device) return false;
+  if (device.deviceId !== deviceId) return false;
+  if (device.deviceToken !== deviceToken) return false;
 
-export function updateHeartbeat(phone: string, deviceId: string, deviceToken: string): DeviceInfo | null {
-  const key = `${phone}:${deviceId}`;
-  const device = deviceRegistry.get(key);
-  if (!device) return null;
-  // Validate token
-  if (device.deviceToken !== deviceToken) return null;
   device.lastHeartbeat = Date.now();
-  device.status = 'online';
-  return device;
+  return true;
 }
 
-export function getDevice(phone: string, deviceId: string): DeviceInfo | null {
-  const key = `${phone}:${deviceId}`;
-  return deviceRegistry.get(key) ?? null;
+export function getDevice(phone: string): DeviceInfo | undefined {
+  return devices.get(phone);
 }
 
-export function getDeviceByPhone(phone: string): DeviceInfo | null {
-  for (const device of deviceRegistry.values()) {
-    if (device.phone === phone) return device;
-  }
-  return null;
+export function isDeviceOnline(phone: string): boolean {
+  const device = devices.get(phone);
+  if (!device) return false;
+  return Date.now() - device.lastHeartbeat < 60000;
 }
 
 export function getDeviceStatus(phone: string): 'online' | 'offline' | 'not_registered' {
-  const device = getDeviceByPhone(phone);
+  const device = devices.get(phone);
   if (!device) return 'not_registered';
-  const elapsed = Date.now() - device.lastHeartbeat;
-  if (elapsed > 60000) {
-    device.status = 'offline';
-    return 'offline';
-  }
-  return 'online';
+  return isDeviceOnline(phone) ? 'online' : 'offline';
 }
 
-// --- Command Queue ---
-const commandQueue = new Map<string, RemoteCommand>();
+export function authenticateDevice(
+  phone: string,
+  deviceId: string,
+  deviceToken: string
+): boolean {
+  const device = devices.get(phone);
+  if (!device) return false;
+  if (device.deviceId !== deviceId) return false;
+  if (device.deviceToken !== deviceToken) return false;
+  return true;
+}
+
+// ============================================
+// 命令管理
+// ============================================
 
 export function createCommand(
   phone: string,
-  type: 'bolus' | 'carbs' | 'mixed' | 'suspend' | 'resume' | 'status',
+  type: 'bolus' | 'carbs',
   insulin?: number,
-  carbs?: number,
-): RemoteCommand {
-  const id = `cmd_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  carbs?: number
+): Command {
   const now = Date.now();
-  const command: RemoteCommand = {
-    id,
+  const command: Command = {
+    id: generateCommandId(),
     phone,
     type,
     insulin,
     carbs,
     status: 'pending',
     createdAt: now,
-    expiresAt: now + 5 * 60 * 1000, // 5 minutes expiry
+    expiresAt: now + SAFETY_RULES.COMMAND_EXPIRY_MINUTES * 60 * 1000,
   };
-  commandQueue.set(id, command);
+
+  commands.set(command.id, command);
   return command;
 }
 
-export function getPendingCommands(phone: string): RemoteCommand[] {
+export function getPendingCommands(phone: string): Command[] {
   const now = Date.now();
-  const commands: RemoteCommand[] = [];
-  for (const cmd of commandQueue.values()) {
-    if (cmd.phone === phone && cmd.status === 'pending' && now < cmd.expiresAt) {
-      commands.push(cmd);
+  const pending: Command[] = [];
+
+  for (const cmd of commands.values()) {
+    if (cmd.phone !== phone) continue;
+    if (cmd.status !== 'pending') continue;
+    if (now > cmd.expiresAt) {
+      cmd.status = 'expired';
+      continue;
     }
+    pending.push(cmd);
   }
-  return commands;
+
+  return pending;
 }
 
 export function updateCommandStatus(
-  id: string,
-  status: CommandStatus,
-  result?: { success: boolean; message: string; treatmentId?: string },
-): RemoteCommand | null {
-  const cmd = commandQueue.get(id);
-  if (!cmd) return null;
-  cmd.status = status;
-  if (status === 'completed' || status === 'failed') {
-    cmd.executedAt = Date.now();
-  }
-  if (result) {
-    cmd.result = result;
-  }
-  return cmd;
+  commandId: string,
+  phone: string,
+  deviceId: string,
+  deviceToken: string,
+  success: boolean,
+  message: string
+): Command | null {
+  const command = commands.get(commandId);
+  if (!command) return null;
+  if (command.phone !== phone) return null;
+
+  // 验证设备身份
+  const device = devices.get(phone);
+  if (!device) return null;
+  if (device.deviceId !== deviceId) return null;
+  if (device.deviceToken !== deviceToken) return null;
+
+  command.status = success ? 'completed' : 'failed';
+  command.result = {
+    success,
+    message,
+    executedAt: Date.now(),
+  };
+
+  return command;
 }
 
-export function getCommand(id: string): RemoteCommand | null {
-  return commandQueue.get(id) ?? null;
+export function getCommand(commandId: string, phone: string): Command | null {
+  const command = commands.get(commandId);
+  if (!command) return null;
+  if (command.phone !== phone) return null;
+  return command;
 }
 
-// --- Rate Limiting ---
-const rateLimitStore = new Map<string, RateLimitEntry>();
+// ============================================
+// 用户管理
+// ============================================
 
-/**
- * Check rate limit for a given key
- * Returns { allowed: boolean, remaining: number, resetAt: number }
- */
-export function checkRateLimit(key: string, limit: { maxRequests: number; windowMs: number }): {
-  allowed: boolean;
-  remaining: number;
-  resetAt: number;
-} {
+export function loginUser(phone: string): User {
+  const user: User = {
+    phone,
+    loggedInAt: Date.now(),
+  };
+  users.set(phone, user);
+  return user;
+}
+
+export function getUser(phone: string): User | undefined {
+  return users.get(phone);
+}
+
+export function isAuthenticated(phone: string): boolean {
+  return users.has(phone);
+}
+
+// ============================================
+// 速率限制
+// ============================================
+
+export function checkRateLimit(
+  key: string,
+  maxRequests: number,
+  windowMs: number
+): boolean {
   const now = Date.now();
-  const entry = rateLimitStore.get(key);
+  const requests = rateLimits.get(key) || [];
 
-  if (!entry || now - entry.firstRequest > limit.windowMs) {
-    // New window
-    rateLimitStore.set(key, { count: 1, firstRequest: now, lastRequest: now });
-    return { allowed: true, remaining: limit.maxRequests - 1, resetAt: now + limit.windowMs };
+  // 清理过期记录
+  const validRequests = requests.filter((t) => now - t < windowMs);
+
+  if (validRequests.length >= maxRequests) {
+    rateLimits.set(key, validRequests);
+    return false;
   }
 
-  if (entry.count >= limit.maxRequests) {
-    return { allowed: false, remaining: 0, resetAt: entry.firstRequest + limit.windowMs };
-  }
-
-  entry.count++;
-  entry.lastRequest = now;
-  return { allowed: true, remaining: limit.maxRequests - entry.count, resetAt: entry.firstRequest + limit.windowMs };
+  validRequests.push(now);
+  rateLimits.set(key, validRequests);
+  return true;
 }
 
-// --- Cleanup expired commands (call periodically) ---
-export function cleanupExpiredCommands(): number {
-  const now = Date.now();
-  let cleaned = 0;
-  for (const [id, cmd] of commandQueue.entries()) {
-    if (now > cmd.expiresAt && cmd.status === 'pending') {
-      cmd.status = 'expired';
-      cleaned++;
-    }
-  }
-  // Also clean up devices that haven't heartbeat in 2 minutes
-  for (const [key, device] of deviceRegistry.entries()) {
-    if (now - device.lastHeartbeat > 120000) {
-      device.status = 'offline';
-    }
-  }
-  // Clean up old rate limit entries
-  for (const [key, entry] of rateLimitStore.entries()) {
-    if (now - entry.firstRequest > 300000) { // 5 minutes
-      rateLimitStore.delete(key);
-    }
-  }
-  return cleaned;
+// ============================================
+// 工具函数
+// ============================================
+
+function generateDeviceToken(phone: string, deviceId: string): string {
+  const crypto = require('crypto');
+  return crypto
+    .createHash('sha256')
+    .update(`${phone}:${deviceId}:${Date.now()}:${Math.random()}`)
+    .digest('hex');
 }
 
-// Run cleanup every 30 seconds
-if (typeof globalThis !== 'undefined') {
-  setInterval(cleanupExpiredCommands, 30000);
+function generateCommandId(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const random = Array.from({ length: 12 }, () =>
+    chars.charAt(Math.floor(Math.random() * chars.length))
+  ).join('');
+  return `cmd_${Date.now().toString(36)}_${random}`;
 }

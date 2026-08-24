@@ -1,226 +1,176 @@
 'use client';
 
 import { useState, useCallback, useRef } from 'react';
-import type { CommandType, RemoteCommand } from '@/lib/types';
+import type { Command, CommandStatus } from '@/lib/types';
 
-/** 命令执行状态 */
-export type CommandExecStatus =
-  | 'idle'           // 空闲
-  | 'creating'       // 正在创建命令
-  | 'pending'        // 命令已创建，等待设备执行
-  | 'executing'      // 设备正在执行
-  | 'completed'      // 执行成功
-  | 'failed'         // 执行失败
-  | 'expired';       // 命令过期
+type RemoteCommandStatus =
+  | 'idle'
+  | 'sending'
+  | 'sent'
+  | 'polling'
+  | 'completed'
+  | 'failed'
+  | 'timeout';
 
-/** 命令执行结果 */
-export interface CommandExecResult {
-  status: CommandExecStatus;
-  commandId?: string;
+interface RemoteCommandResult {
+  status: RemoteCommandStatus;
+  command: Command | null;
   message: string;
-  timestamp: number;
 }
 
 interface UseRemoteCommandReturn {
+  commandState: RemoteCommandResult;
   sendCommand: (
-    type: CommandType,
-    params: { insulin?: number; carbs?: number },
-  ) => Promise<CommandExecResult>;
-  status: CommandExecStatus;
-  result: CommandExecResult | null;
-  isSending: boolean;
-  clearResult: () => void;
+    phone: string,
+    type: 'bolus' | 'carbs',
+    insulin?: number,
+    carbs?: number
+  ) => Promise<void>;
+  reset: () => void;
 }
 
-/**
- * 远程命令发送 Hook
- *
- * 流程：
- * 1. 调用 /api/command/create 创建命令
- * 2. 每 3 秒轮询 /api/command/status 查询命令状态
- * 3. 最长等待 120 秒
- * 4. 状态流转：idle → creating → pending → executing → completed/failed/expired
- */
-export function useRemoteCommand(phone: string): UseRemoteCommandReturn {
-  const [status, setStatus] = useState<CommandExecStatus>('idle');
-  const [result, setResult] = useState<CommandExecResult | null>(null);
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const timeoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+export function useRemoteCommand(): UseRemoteCommandReturn {
+  const [commandState, setCommandState] = useState<RemoteCommandResult>({
+    status: 'idle',
+    command: null,
+    message: '',
+  });
+  const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const clearTimers = useCallback(() => {
+  const reset = useCallback(() => {
     if (pollTimerRef.current) {
       clearInterval(pollTimerRef.current);
       pollTimerRef.current = null;
     }
-    if (timeoutTimerRef.current) {
-      clearTimeout(timeoutTimerRef.current);
-      timeoutTimerRef.current = null;
-    }
+    setCommandState({ status: 'idle', command: null, message: '' });
   }, []);
 
-  const pollCommandStatus = useCallback(async (commandId: string) => {
-    try {
-      const res = await fetch(`/api/command/status?id=${encodeURIComponent(commandId)}&phone=${encodeURIComponent(phone)}`, {
-        headers: { 'x-user-phone': phone },
-      });
-      const data = await res.json();
+  const pollCommandStatus = useCallback(
+    async (commandId: string, phone: string, maxAttempts: number = 24) => {
+      let attempts = 0;
 
-      if (!data.success) {
-        setStatus('failed');
-        setResult({
-          status: 'failed',
-          commandId,
-          message: data.message || '查询命令状态失败',
-          timestamp: Date.now(),
-        });
-        clearTimers();
-        return;
-      }
+      const poll = async () => {
+        attempts++;
 
-      const cmd: RemoteCommand = data.command;
+        try {
+          const res = await fetch(
+            `/api/command/status?id=${commandId}&phone=${phone}`
+          );
+          const data = await res.json();
 
-      if (cmd.status === 'completed') {
-        setStatus('completed');
-        setResult({
-          status: 'completed',
-          commandId,
-          message: cmd.result?.message || '命令执行成功',
-          timestamp: Date.now(),
-        });
-        clearTimers();
-      } else if (cmd.status === 'failed') {
-        setStatus('failed');
-        setResult({
-          status: 'failed',
-          commandId,
-          message: cmd.result?.message || '命令执行失败',
-          timestamp: Date.now(),
-        });
-        clearTimers();
-      } else if (cmd.status === 'expired') {
-        setStatus('expired');
-        setResult({
-          status: 'expired',
-          commandId,
-          message: '命令已过期，设备未响应（超时 5 分钟）',
-          timestamp: Date.now(),
-        });
-        clearTimers();
-      } else if (cmd.status === 'executing') {
-        setStatus('executing');
-      } else {
-        setStatus('pending');
-      }
-    } catch {
-      // 网络错误，继续轮询
-    }
-  }, [phone, clearTimers]);
+          if (data.success && data.command) {
+            const cmd: Command = data.command;
 
-  const sendCommand = useCallback(async (
-    type: CommandType,
-    params: { insulin?: number; carbs?: number },
-  ): Promise<CommandExecResult> => {
-    // Clear any previous state
-    clearTimers();
-    setStatus('creating');
-    setResult(null);
+            if (cmd.status === 'completed') {
+              setCommandState({
+                status: 'completed',
+                command: cmd,
+                message: `命令执行成功：${cmd.result?.message || '已完成'}`,
+              });
+              if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+              return;
+            }
 
-    try {
-      // Step 1: Create command
-      const createRes = await fetch('/api/command/create', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-phone': phone,
-        },
-        body: JSON.stringify({
-          phone,
-          type,
-          insulin: params.insulin,
-          carbs: params.carbs,
-        }),
-      });
+            if (cmd.status === 'failed') {
+              setCommandState({
+                status: 'failed',
+                command: cmd,
+                message: `命令执行失败：${cmd.result?.message || '未知错误'}`,
+              });
+              if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+              return;
+            }
 
-      const createData = await createRes.json();
+            if (cmd.status === 'expired') {
+              setCommandState({
+                status: 'timeout',
+                command: cmd,
+                message: '命令已过期，设备未在规定时间内执行',
+              });
+              if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+              return;
+            }
 
-      if (!createData.success) {
-        const failResult: CommandExecResult = {
-          status: 'failed',
-          message: createData.message || '命令创建失败',
-          timestamp: Date.now(),
-        };
-        setStatus('failed');
-        setResult(failResult);
-        return failResult;
-      }
-
-      const commandId: string = createData.commandId;
-
-      // Step 2: Start polling
-      setStatus('pending');
-      setResult({
-        status: 'pending',
-        commandId,
-        message: '命令已创建，等待设备执行...',
-        timestamp: Date.now(),
-      });
-
-      // Poll every 3 seconds
-      pollTimerRef.current = setInterval(() => {
-        pollCommandStatus(commandId);
-      }, 3000);
-
-      // Timeout after 120 seconds
-      timeoutTimerRef.current = setTimeout(() => {
-        setStatus('expired');
-        setResult({
-          status: 'expired',
-          commandId,
-          message: '等待超时（120 秒），设备未响应',
-          timestamp: Date.now(),
-        });
-        clearTimers();
-      }, 120000);
-
-      // Return a promise that resolves when the command completes
-      return new Promise((resolve) => {
-        const checkInterval = setInterval(() => {
-          if (status === 'completed' || status === 'failed' || status === 'expired') {
-            clearInterval(checkInterval);
-            if (result) resolve(result);
+            // 仍在执行中
+            setCommandState({
+              status: 'polling',
+              command: cmd,
+              message: `等待设备执行... (${attempts}/${maxAttempts})`,
+            });
           }
-        }, 500);
+        } catch (error) {
+          console.error('Poll error:', error);
+        }
 
-        // Also set a max timeout for the promise
-        setTimeout(() => {
-          clearInterval(checkInterval);
-          if (result) resolve(result);
-        }, 125000);
-      });
-    } catch (error) {
-      const failResult: CommandExecResult = {
-        status: 'failed',
-        message: error instanceof Error ? error.message : '网络错误',
-        timestamp: Date.now(),
+        if (attempts >= maxAttempts) {
+          setCommandState({
+            status: 'timeout',
+            command: null,
+            message: '等待超时，设备可能离线',
+          });
+          if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+        }
       };
-      setStatus('failed');
-      setResult(failResult);
-      clearTimers();
-      return failResult;
-    }
-  }, [phone, clearTimers, pollCommandStatus, status, result]);
 
-  const clearResult = useCallback(() => {
-    clearTimers();
-    setStatus('idle');
-    setResult(null);
-  }, [clearTimers]);
+      // 立即执行一次
+      await poll();
 
-  return {
-    sendCommand,
-    status,
-    result,
-    isSending: status !== 'idle' && status !== 'completed' && status !== 'failed' && status !== 'expired',
-    clearResult,
-  };
+      // 每 5 秒轮询一次
+      pollTimerRef.current = setInterval(poll, 5000);
+    },
+    []
+  );
+
+  const sendCommand = useCallback(
+    async (
+      phone: string,
+      type: 'bolus' | 'carbs',
+      insulin?: number,
+      carbs?: number
+    ) => {
+      reset();
+      setCommandState({ status: 'sending', command: null, message: '正在发送命令...' });
+
+      try {
+        const res = await fetch('/api/command/create', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-phone': phone,
+          },
+          body: JSON.stringify({ phone, type, insulin, carbs }),
+        });
+
+        const data = await res.json();
+
+        if (!data.success) {
+          setCommandState({
+            status: 'failed',
+            command: null,
+            message: data.message || '命令创建失败',
+          });
+          return;
+        }
+
+        setCommandState({
+          status: 'sent',
+          command: null,
+          message: '命令已发送，等待设备接收...',
+        });
+
+        // 开始轮询命令状态
+        await pollCommandStatus(data.commandId, phone);
+      } catch (error) {
+        console.error('Send command error:', error);
+        setCommandState({
+          status: 'failed',
+          command: null,
+          message: '网络错误，请重试',
+        });
+      }
+    },
+    [reset, pollCommandStatus]
+  );
+
+  return { commandState, sendCommand, reset };
 }
