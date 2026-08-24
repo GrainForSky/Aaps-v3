@@ -131,6 +131,11 @@ export interface NightscoutConfig {
 export interface NightscoutConfigResponse {
   success: boolean;
   message: string;
+  debug?: {
+    endpoint?: string;
+    status?: number;
+    error?: string;
+  };
 }
 
 // CGM 血糖数据

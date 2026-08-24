@@ -156,7 +156,7 @@ function ConfigScreen({
   const [url, setUrl] = useState(config.url);
   const [apiSecret, setApiSecret] = useState(config.apiSecret);
   const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string; debug?: { baseUrl: string; endpointsTested: string[] } } | null>(null);
 
   const testConnection = async () => {
     if (!url || !apiSecret) {
@@ -174,7 +174,11 @@ function ConfigScreen({
         body: JSON.stringify({ url, apiSecret }),
       });
       const data = await res.json();
-      setTestResult(data);
+      setTestResult({
+        success: data.success,
+        message: data.message,
+        debug: data.debug,
+      });
     } catch {
       setTestResult({ success: false, message: '网络错误' });
     } finally {
@@ -265,6 +269,19 @@ function ConfigScreen({
                   {testResult.message}
                 </AlertDescription>
               </Alert>
+            )}
+
+            {testResult && !testResult.success && 'debug' in testResult && testResult.debug && (
+              <div className="text-xs text-slate-500 space-y-1">
+                <div>调试信息：</div>
+                <div>• 服务器地址：{testResult.debug.baseUrl}</div>
+                <div>• 测试的接口：</div>
+                <ul className="list-disc list-inside ml-2">
+                  {testResult.debug.endpointsTested.map((ep: string, i: number) => (
+                    <li key={i}>{ep}</li>
+                  ))}
+                </ul>
+              </div>
             )}
           </CardContent>
         </Card>
