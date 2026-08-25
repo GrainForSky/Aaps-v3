@@ -30,7 +30,10 @@ function saveSafetyLock(state: SafetyLockState) {
   } catch {}
 }
 
-export function useSafetyLock() {
+export function useSafetyLock(insulinLockMinutes?: number, carbsLockMinutes?: number) {
+  const insulinMinutes = insulinLockMinutes ?? 15;
+  const carbsMinutes = carbsLockMinutes ?? 1;
+
   const [lockState, setLockState] = useState<SafetyLockState>({ insulinUntil: 0, carbsUntil: 0 });
   const [now, setNow] = useState(0);
   const [initialized, setInitialized] = useState(false);
@@ -64,20 +67,20 @@ export function useSafetyLock() {
   const recordBolus = useCallback(() => {
     const newLock = {
       ...lockState,
-      insulinUntil: Date.now() + SAFETY_RULES.INSULIN_LOCK_MINUTES * 60 * 1000,
+      insulinUntil: Date.now() + insulinMinutes * 60 * 1000,
     };
     setLockState(newLock);
     saveSafetyLock(newLock);
-  }, [lockState]);
+  }, [lockState, insulinMinutes]);
 
   const recordCarbs = useCallback(() => {
     const newLock = {
       ...lockState,
-      carbsUntil: Date.now() + SAFETY_RULES.CARBS_LOCK_MINUTES * 60 * 1000,
+      carbsUntil: Date.now() + carbsMinutes * 60 * 1000,
     };
     setLockState(newLock);
     saveSafetyLock(newLock);
-  }, [lockState]);
+  }, [lockState, carbsMinutes]);
 
   const clearLock = useCallback(() => {
     const newLock = { insulinUntil: 0, carbsUntil: 0 };

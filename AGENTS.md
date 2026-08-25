@@ -16,6 +16,7 @@ src/
 ├── app/
 │   ├── api/
 │   │   ├── device/              # 设备管理 API
+│   │   │   ├── login/route.ts      # 用户登录 (POST)
 │   │   │   ├── register/route.ts   # 设备注册 (POST)
 │   │   │   ├── heartbeat/route.ts  # 设备心跳 (POST)
 │   │   │   ├── commands/route.ts   # 设备轮询命令 (GET)
@@ -39,6 +40,7 @@ src/
 │   └── use-remote-command.ts  # 远程命令发送 Hook
 ├── lib/
 │   ├── types.ts               # 类型定义
+│   ├── config.ts              # 安全规则配置文件
 │   ├── utils.ts               # 工具函数
 │   └── store.ts               # 内存数据存储（设备注册、命令队列）
 └── SOLUTION.md                # AndroidAPS 源码修改方案
@@ -59,6 +61,7 @@ src/
 5. **安全锁定**: 胰岛素 15 分钟 / 碳水 1 分钟防重复
 6. **数据查看**: CGM 血糖、泵状态、治疗历史
 7. **二次确认**: 所有医疗操作需要确认弹窗
+8. **可配置安全规则**: 通过配置文件 (src/lib/config.ts) 控制剂量限制和锁定时间
 
 ## 架构说明
 
@@ -80,6 +83,7 @@ Web 用户 → GET /api/nightscout/treatments → Nightscout 二次确认
 ## API 说明
 
 ### 设备管理 API
+- `POST /api/device/login` - 用户登录
 - `POST /api/device/register` - 设备注册
 - `POST /api/device/heartbeat` - 设备心跳
 - `GET /api/device/commands?phone=` - 设备轮询命令

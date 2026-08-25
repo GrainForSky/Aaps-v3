@@ -22,6 +22,7 @@ import {
   RefreshCw,
   Shield,
   Timer,
+  Database,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -158,6 +159,12 @@ function ConfigScreen({
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; debug?: { baseUrl: string; endpointsTested: string[] } } | null>(null);
 
+  // 可配置的安全规则
+  const [maxBolusUnits, setMaxBolusUnits] = useState<number>(SAFETY_RULES.MAX_BOLUS_UNITS);
+  const [maxCarbsGrams, setMaxCarbsGrams] = useState<number>(SAFETY_RULES.MAX_CARBS_GRAMS);
+  const [insulinLockMinutes, setInsulinLockMinutes] = useState<number>(SAFETY_RULES.INSULIN_LOCK_MINUTES);
+  const [carbsLockMinutes, setCarbsLockMinutes] = useState<number>(SAFETY_RULES.CARBS_LOCK_MINUTES);
+
   const testConnection = async () => {
     if (!url || !apiSecret) {
       setTestResult({ success: false, message: '请填写完整信息' });
@@ -188,6 +195,13 @@ function ConfigScreen({
 
   const handleSave = () => {
     onSave({ url, apiSecret });
+    // 保存可配置的安全规则
+    localStorage.setItem('aaps_safety_rules', JSON.stringify({
+      MAX_BOLUS_UNITS: maxBolusUnits,
+      MAX_CARBS_GRAMS: maxCarbsGrams,
+      INSULIN_LOCK_MINUTES: insulinLockMinutes,
+      CARBS_LOCK_MINUTES: carbsLockMinutes,
+    }));
     onBack(); // 保存后关闭对话框
   };
 
@@ -291,22 +305,54 @@ function ConfigScreen({
           <CardHeader>
             <CardTitle className="text-white flex items-center gap-2">
               <Shield className="w-5 h-5 text-amber-400" />
-              安全规则
+              安全规则配置
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              <div className="text-slate-400">
-                最大胰岛素剂量：<span className="text-amber-400 font-bold">{SAFETY_RULES.MAX_BOLUS_UNITS}U</span>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">最大胰岛素剂量 (U)</label>
+                <Input
+                  type="number"
+                  value={maxBolusUnits}
+                  onChange={(e) => setMaxBolusUnits(Number(e.target.value))}
+                  min={1}
+                  max={50}
+                  className="bg-slate-900 border-slate-600 text-white"
+                />
               </div>
-              <div className="text-slate-400">
-                最大碳水剂量：<span className="text-green-400 font-bold">{SAFETY_RULES.MAX_CARBS_GRAMS}g</span>
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">最大碳水剂量 (g)</label>
+                <Input
+                  type="number"
+                  value={maxCarbsGrams}
+                  onChange={(e) => setMaxCarbsGrams(Number(e.target.value))}
+                  min={1}
+                  max={300}
+                  className="bg-slate-900 border-slate-600 text-white"
+                />
               </div>
-              <div className="text-slate-400">
-                胰岛素锁定时间：<span className="text-amber-400 font-bold">{SAFETY_RULES.INSULIN_LOCK_MINUTES}分钟</span>
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">胰岛素锁定时间 (分钟)</label>
+                <Input
+                  type="number"
+                  value={insulinLockMinutes}
+                  onChange={(e) => setInsulinLockMinutes(Number(e.target.value))}
+                  min={1}
+                  max={60}
+                  className="bg-slate-900 border-slate-600 text-white"
+                />
               </div>
-              <div className="text-slate-400">
-                碳水锁定时间：<span className="text-green-400 font-bold">{SAFETY_RULES.CARBS_LOCK_MINUTES}分钟</span>
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">碳水锁定时间 (分钟)</label>
+                <Input
+                  type="number"
+                  value={carbsLockMinutes}
+                  onChange={(e) => setCarbsLockMinutes(Number(e.target.value))}
+                  min={1}
+                  max={30}
+                  className="bg-slate-900 border-slate-600 text-white"
+                />
               </div>
             </div>
           </CardContent>
@@ -383,12 +429,20 @@ function DeviceStatusIndicator({
 function DeliveryControl({
   phone,
   nsConfig,
+  safetyConfig: externalSafetyConfig,
 }: {
   phone: string;
   nsConfig: NightscoutConfig;
+  safetyConfig: {
+    insulinLockMinutes: number;
+    carbsLockMinutes: number;
+    maxBolusUnits: number;
+    maxCarbsGrams: number;
+    commandTimeoutMinutes: number;
+  };
 }) {
   const { isInsulinLocked, isCarbsLocked, insulinCountdown, carbsCountdown, recordBolus, recordCarbs } =
-    useSafetyLock();
+    useSafetyLock(externalSafetyConfig.insulinLockMinutes, externalSafetyConfig.carbsLockMinutes);
   const { commandState, sendCommand, reset } = useRemoteCommand();
 
   const [insulinDose, setInsulinDose] = useState('');
@@ -398,7 +452,7 @@ function DeliveryControl({
 
   const handleInsulinSubmit = async () => {
     const dose = parseFloat(insulinDose);
-    if (isNaN(dose) || dose <= 0 || dose > SAFETY_RULES.MAX_BOLUS_UNITS) {
+    if (isNaN(dose) || dose <= 0 || dose > externalSafetyConfig.maxBolusUnits) {
       return;
     }
     setShowInsulinConfirm(false);
@@ -410,7 +464,7 @@ function DeliveryControl({
 
   const handleCarbsSubmit = async () => {
     const dose = parseFloat(carbsDose);
-    if (isNaN(dose) || dose <= 0 || dose > SAFETY_RULES.MAX_CARBS_GRAMS) {
+    if (isNaN(dose) || dose <= 0 || dose > externalSafetyConfig.maxCarbsGrams) {
       return;
     }
     setShowCarbsConfirm(false);
@@ -496,8 +550,8 @@ function DeliveryControl({
               type="number"
               step="0.1"
               min="0.1"
-              max={SAFETY_RULES.MAX_BOLUS_UNITS}
-              placeholder={`0.1 - ${SAFETY_RULES.MAX_BOLUS_UNITS}`}
+              max={externalSafetyConfig.maxBolusUnits}
+              placeholder={`0.1 - ${externalSafetyConfig.maxBolusUnits}`}
               value={insulinDose}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setInsulinDose(e.target.value)}
               disabled={isInsulinLocked || commandState.status !== 'idle'}
@@ -558,8 +612,8 @@ function DeliveryControl({
               type="number"
               step="1"
               min="1"
-              max={SAFETY_RULES.MAX_CARBS_GRAMS}
-              placeholder={`1 - ${SAFETY_RULES.MAX_CARBS_GRAMS}`}
+              max={externalSafetyConfig.maxCarbsGrams}
+              placeholder={`1 - ${externalSafetyConfig.maxCarbsGrams}`}
               value={carbsDose}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCarbsDose(e.target.value)}
               disabled={isCarbsLocked || commandState.status !== 'idle'}
@@ -695,13 +749,35 @@ function DataPanel({ nsConfig }: { nsConfig: NightscoutConfig }) {
     } finally {
       setLoading(false);
     }
-  }, [nsConfig]);
+  }, [nsConfig.url, nsConfig.apiSecret]);
 
   useEffect(() => {
     fetchData();
     const timer = setInterval(fetchData, 30000);
     return () => clearInterval(timer);
   }, [fetchData]);
+
+  // 未配置 Nightscout 时显示提示
+  if (!nsConfig.url || !nsConfig.apiSecret) {
+    return (
+      <div className="space-y-6">
+        <Card className="bg-slate-800/50 border-slate-700">
+          <CardContent className="pt-6">
+            <div className="text-center py-8">
+              <Database className="w-16 h-16 mx-auto text-slate-600 mb-4" />
+              <h3 className="text-lg font-medium text-slate-300 mb-2">未配置 Nightscout</h3>
+              <p className="text-sm text-slate-500 mb-4">
+                请先在配置页面设置 Nightscout URL 和 API Secret
+              </p>
+              <p className="text-xs text-slate-600">
+                配置后数据将自动显示在此处
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   const latestEntry = entries[0];
   const bgValue = latestEntry?.sgv;
@@ -887,6 +963,20 @@ export default function Home() {
     localStorage.setItem('aaps-ns-config', JSON.stringify(config));
   };
 
+  // 安全规则配置
+  const [safetyConfig, setSafetyConfig] = useState({
+    insulinLockMinutes: 15,
+    carbsLockMinutes: 1,
+    maxBolusUnits: 25,
+    maxCarbsGrams: 150,
+    commandTimeoutMinutes: 5,
+  });
+
+  const handleSaveSafetyConfig = (config: typeof safetyConfig) => {
+    setSafetyConfig(config);
+    localStorage.setItem('aaps-safety-config', JSON.stringify(config));
+  };
+
   if (!userPhone) {
     return <LoginScreen onLogin={handleLogin} />;
   }
@@ -952,7 +1042,7 @@ export default function Home() {
           </TabsList>
 
           <TabsContent value="delivery">
-            <DeliveryControl phone={userPhone} nsConfig={nsConfig} />
+            <DeliveryControl phone={userPhone} nsConfig={nsConfig} safetyConfig={safetyConfig} />
           </TabsContent>
 
           <TabsContent value="data">
