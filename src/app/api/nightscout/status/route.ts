@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createHash } from 'crypto';
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,8 +15,9 @@ export async function GET(request: NextRequest) {
     }
 
     const baseUrl = url.replace(/\/$/, '');
+    const hashedSecret = createHash('sha1').update(apiSecret).digest('hex');
     const response = await fetch(`${baseUrl}/api/v1/status.json`, {
-      headers: { 'api-secret': apiSecret },
+      headers: { 'api-secret': hashedSecret },
       signal: AbortSignal.timeout(15000),
     });
 

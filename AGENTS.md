@@ -54,14 +54,14 @@ src/
 - `pnpm lint` - ESLint 检查
 
 ## 核心功能
-1. **手机号登录**: 输入手机号登录，该号码需与 AndroidAPS 设备上注册的号码一致
+1. **手机号+PIN码登录**: 输入手机号和PIN码登录，首次登录自动创建账户。PIN码至少4位
 2. **Nightscout 配置**: URL + API Secret，用于读取数据
 3. **设备在线状态**: 实时显示 AndroidAPS 设备在线/离线状态
 4. **远程输注**: 通过命令队列发送 BOLUS/CARBS 命令到 AndroidAPS
 5. **安全锁定**: 胰岛素 15 分钟 / 碳水 1 分钟防重复
 6. **数据查看**: CGM 血糖、泵状态、治疗历史
 7. **二次确认**: 所有医疗操作需要确认弹窗
-8. **可配置安全规则**: 通过配置文件 (src/lib/config.ts) 控制剂量限制和锁定时间
+8. **可配置安全规则**: 通过配置界面控制剂量限制和锁定时间，保存到 localStorage
 
 ## 架构说明
 
@@ -83,7 +83,7 @@ Web 用户 → GET /api/nightscout/treatments → Nightscout 二次确认
 ## API 说明
 
 ### 设备管理 API
-- `POST /api/device/login` - 用户登录
+- `POST /api/device/login` - 用户登录（需要 phone + pin）
 - `POST /api/device/register` - 设备注册
 - `POST /api/device/heartbeat` - 设备心跳
 - `GET /api/device/commands?phone=` - 设备轮询命令
@@ -106,4 +106,6 @@ Web 用户 → GET /api/nightscout/treatments → Nightscout 二次确认
 - 所有医疗操作需要二次确认
 - 前端不持久化存储 API Secret（仅保存在内存 state 中）
 - 命令有效期 5 分钟，超时自动失效
-- 登录手机号需与 AndroidAPS 设备上注册的号码一致
+- 登录需要手机号 + PIN 码，首次登录自动创建账户
+- PIN 码存储在服务端内存中（重启后需重新注册）
+- 安全规则可通过配置界面修改，保存在浏览器 localStorage 中

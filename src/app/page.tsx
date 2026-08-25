@@ -33,7 +33,6 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
 import { useSafetyLock } from '@/hooks/use-safety-lock';
 import { useRemoteCommand } from '@/hooks/use-remote-command';
-import { SAFETY_RULES } from '@/lib/types';
 import { cn, isValidPhone, timeAgo } from '@/lib/utils';
 
 // ============================================
@@ -57,12 +56,17 @@ interface DeviceStatus {
 
 function LoginScreen({ onLogin }: { onLogin: (phone: string) => void }) {
   const [phone, setPhone] = useState('');
+  const [pin, setPin] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const handleLogin = async () => {
     if (!isValidPhone(phone)) {
       setError('请输入正确的手机号');
+      return;
+    }
+    if (!pin || pin.length < 4) {
+      setError('PIN 码至少 4 位');
       return;
     }
 
@@ -73,7 +77,7 @@ function LoginScreen({ onLogin }: { onLogin: (phone: string) => void }) {
       const res = await fetch('/api/device/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone }),
+        body: JSON.stringify({ phone, pin }),
       });
       const data = await res.json();
 
@@ -98,7 +102,7 @@ function LoginScreen({ onLogin }: { onLogin: (phone: string) => void }) {
           </div>
           <CardTitle className="text-2xl font-bold text-white">AndroidAPS 远程控制</CardTitle>
           <CardDescription className="text-slate-400">
-            输入手机号登录，远程管理胰岛素和碳水输注
+            输入手机号和 PIN 码登录，远程管理胰岛素和碳水输注
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -108,9 +112,21 @@ function LoginScreen({ onLogin }: { onLogin: (phone: string) => void }) {
               placeholder="请输入手机号"
               value={phone}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPhone(e.target.value)}
-              onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => e.key === 'Enter' && handleLogin()}
               className="bg-slate-700/50 border-slate-600 text-white placeholder:text-slate-500"
               maxLength={11}
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-slate-300">PIN 码</label>
+            <Input
+              type="password"
+              placeholder="请输入 PIN 码（首次登录将自动注册）"
+              value={pin}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPin(e.target.value)}
+              onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => e.key === 'Enter' && handleLogin()}
+              className="bg-slate-700/50 border-slate-600 text-white placeholder:text-slate-500"
+              maxLength={8}
             />
           </div>
 
@@ -123,7 +139,7 @@ function LoginScreen({ onLogin }: { onLogin: (phone: string) => void }) {
 
           <Button
             onClick={handleLogin}
-            disabled={loading || !phone}
+            disabled={loading || !phone || !pin}
             className="w-full bg-cyan-600 hover:bg-cyan-500 text-white"
           >
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
@@ -132,6 +148,8 @@ function LoginScreen({ onLogin }: { onLogin: (phone: string) => void }) {
 
           <p className="text-xs text-center text-slate-500">
             登录号码需与 AndroidAPS 设备上注册的号码一致
+            <br />
+            首次登录将自动创建账户，请记住您的 PIN 码
           </p>
         </CardContent>
       </Card>
@@ -143,15 +161,27 @@ function LoginScreen({ onLogin }: { onLogin: (phone: string) => void }) {
 // 配置界面
 // ============================================
 
+interface SafetyConfigType {
+  insulinLockMinutes: number;
+  carbsLockMinutes: number;
+  maxBolusUnits: number;
+  maxCarbsGrams: number;
+  commandTimeoutMinutes: number;
+}
+
 function ConfigScreen({
   phone,
   config,
+  safetyConfig,
   onSave,
+  onSaveSafety,
   onBack,
 }: {
   phone: string;
   config: NightscoutConfig;
+  safetyConfig: SafetyConfigType;
   onSave: (config: NightscoutConfig) => void;
+  onSaveSafety: (config: SafetyConfigType) => void;
   onBack: () => void;
 }) {
   const [url, setUrl] = useState(config.url);
@@ -159,11 +189,11 @@ function ConfigScreen({
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; debug?: { baseUrl: string; endpointsTested: string[] } } | null>(null);
 
-  // 可配置的安全规则
-  const [maxBolusUnits, setMaxBolusUnits] = useState<number>(SAFETY_RULES.MAX_BOLUS_UNITS);
-  const [maxCarbsGrams, setMaxCarbsGrams] = useState<number>(SAFETY_RULES.MAX_CARBS_GRAMS);
-  const [insulinLockMinutes, setInsulinLockMinutes] = useState<number>(SAFETY_RULES.INSULIN_LOCK_MINUTES);
-  const [carbsLockMinutes, setCarbsLockMinutes] = useState<number>(SAFETY_RULES.CARBS_LOCK_MINUTES);
+  // 可配置的安全规则（从父组件传入）
+  const [maxBolusUnits, setMaxBolusUnits] = useState<number>(safetyConfig.maxBolusUnits);
+  const [maxCarbsGrams, setMaxCarbsGrams] = useState<number>(safetyConfig.maxCarbsGrams);
+  const [insulinLockMinutes, setInsulinLockMinutes] = useState<number>(safetyConfig.insulinLockMinutes);
+  const [carbsLockMinutes, setCarbsLockMinutes] = useState<number>(safetyConfig.carbsLockMinutes);
 
   const testConnection = async () => {
     if (!url || !apiSecret) {
@@ -195,13 +225,14 @@ function ConfigScreen({
 
   const handleSave = () => {
     onSave({ url, apiSecret });
-    // 保存可配置的安全规则
-    localStorage.setItem('aaps_safety_rules', JSON.stringify({
-      MAX_BOLUS_UNITS: maxBolusUnits,
-      MAX_CARBS_GRAMS: maxCarbsGrams,
-      INSULIN_LOCK_MINUTES: insulinLockMinutes,
-      CARBS_LOCK_MINUTES: carbsLockMinutes,
-    }));
+    // 保存安全规则到父组件
+    onSaveSafety({
+      maxBolusUnits,
+      maxCarbsGrams,
+      insulinLockMinutes,
+      carbsLockMinutes,
+      commandTimeoutMinutes: 5,
+    });
     onBack(); // 保存后关闭对话框
   };
 
@@ -913,14 +944,36 @@ export default function Home() {
   const [nsConfig, setNsConfig] = useState<NightscoutConfig>({ url: '', apiSecret: '' });
   const [deviceStatus, setDeviceStatus] = useState<DeviceStatus | null>(null);
 
+  // 安全规则配置（必须在 useEffect 之前声明）
+  const [safetyConfig, setSafetyConfig] = useState<SafetyConfigType>({
+    insulinLockMinutes: 15,
+    carbsLockMinutes: 1,
+    maxBolusUnits: 25,
+    maxCarbsGrams: 150,
+    commandTimeoutMinutes: 5,
+  });
+
   // 从 localStorage 恢复
   useEffect(() => {
     const savedPhone = localStorage.getItem('aaps-phone');
     const savedNs = localStorage.getItem('aaps-ns-config');
+    const savedSafety = localStorage.getItem('aaps-safety-config');
     if (savedPhone) setUserPhone(savedPhone);
     if (savedNs) {
       try {
         setNsConfig(JSON.parse(savedNs));
+      } catch {}
+    }
+    if (savedSafety) {
+      try {
+        const parsed = JSON.parse(savedSafety);
+        setSafetyConfig({
+          insulinLockMinutes: parsed.insulinLockMinutes ?? 15,
+          carbsLockMinutes: parsed.carbsLockMinutes ?? 1,
+          maxBolusUnits: parsed.maxBolusUnits ?? 25,
+          maxCarbsGrams: parsed.maxCarbsGrams ?? 150,
+          commandTimeoutMinutes: parsed.commandTimeoutMinutes ?? 5,
+        });
       } catch {}
     }
   }, []);
@@ -963,16 +1016,7 @@ export default function Home() {
     localStorage.setItem('aaps-ns-config', JSON.stringify(config));
   };
 
-  // 安全规则配置
-  const [safetyConfig, setSafetyConfig] = useState({
-    insulinLockMinutes: 15,
-    carbsLockMinutes: 1,
-    maxBolusUnits: 25,
-    maxCarbsGrams: 150,
-    commandTimeoutMinutes: 5,
-  });
-
-  const handleSaveSafetyConfig = (config: typeof safetyConfig) => {
+  const handleSaveSafetyConfig = (config: SafetyConfigType) => {
     setSafetyConfig(config);
     localStorage.setItem('aaps-safety-config', JSON.stringify(config));
   };
@@ -986,7 +1030,9 @@ export default function Home() {
       <ConfigScreen
         phone={userPhone}
         config={nsConfig}
+        safetyConfig={safetyConfig}
         onSave={handleSaveNsConfig}
+        onSaveSafety={handleSaveSafetyConfig}
         onBack={() => setShowConfig(false)}
       />
     );

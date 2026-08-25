@@ -169,9 +169,10 @@ export function getCommand(commandId: string, phone: string): Command | null {
 // 用户管理
 // ============================================
 
-export function loginUser(phone: string): User {
+export function loginUser(phone: string, pin: string): User {
   const user: User = {
     phone,
+    pin,
     loggedInAt: Date.now(),
   };
   users.set(phone, user);
@@ -184,6 +185,12 @@ export function getUser(phone: string): User | undefined {
 
 export function isAuthenticated(phone: string): boolean {
   return users.has(phone);
+}
+
+export function verifyUser(phone: string, pin: string): boolean {
+  const user = users.get(phone);
+  if (!user) return false;
+  return user.pin === pin;
 }
 
 // ============================================

@@ -185,5 +185,6 @@ export interface SafetyLock {
 // 登录用户
 export interface User {
   phone: string;
+  pin: string;
   loggedInAt: number;
 }
