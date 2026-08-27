@@ -953,30 +953,54 @@ export default function Home() {
     commandTimeoutMinutes: 5,
   });
 
-  // 从 localStorage 恢复
+  // 从 localStorage 恢复手机号，然后从服务端加载配置
   useEffect(() => {
     const savedPhone = localStorage.getItem('aaps-phone');
-    const savedNs = localStorage.getItem('aaps-ns-config');
-    const savedSafety = localStorage.getItem('aaps-safety-config');
-    if (savedPhone) setUserPhone(savedPhone);
-    if (savedNs) {
-      try {
-        setNsConfig(JSON.parse(savedNs));
-      } catch {}
-    }
-    if (savedSafety) {
-      try {
-        const parsed = JSON.parse(savedSafety);
-        setSafetyConfig({
-          insulinLockMinutes: parsed.insulinLockMinutes ?? 15,
-          carbsLockMinutes: parsed.carbsLockMinutes ?? 1,
-          maxBolusUnits: parsed.maxBolusUnits ?? 25,
-          maxCarbsGrams: parsed.maxCarbsGrams ?? 150,
-          commandTimeoutMinutes: parsed.commandTimeoutMinutes ?? 5,
-        });
-      } catch {}
+    if (savedPhone) {
+      setUserPhone(savedPhone);
     }
   }, []);
+
+  // 登录成功后从服务端加载用户配置
+  useEffect(() => {
+    if (!userPhone) return;
+
+    const loadUserConfigs = async () => {
+      try {
+        // 加载 Nightscout 配置
+        const nsRes = await fetch('/api/user/ns-config', {
+          headers: { 'x-user-phone': userPhone },
+        });
+        const nsData = await nsRes.json();
+        if (nsData.success && nsData.data) {
+          setNsConfig({ url: nsData.data.url || '', apiSecret: nsData.data.apiSecret || '' });
+        }
+      } catch (error) {
+        console.error('Load NS config error:', error);
+      }
+
+      try {
+        // 加载安全规则配置
+        const safetyRes = await fetch('/api/user/safety-config', {
+          headers: { 'x-user-phone': userPhone },
+        });
+        const safetyData = await safetyRes.json();
+        if (safetyData.success && safetyData.data) {
+          setSafetyConfig({
+            insulinLockMinutes: safetyData.data.insulinLockMinutes ?? 15,
+            carbsLockMinutes: safetyData.data.carbsLockMinutes ?? 1,
+            maxBolusUnits: safetyData.data.maxBolusUnits ?? 25,
+            maxCarbsGrams: safetyData.data.maxCarbsGrams ?? 150,
+            commandTimeoutMinutes: safetyData.data.commandTimeoutMinutes ?? 5,
+          });
+        }
+      } catch (error) {
+        console.error('Load safety config error:', error);
+      }
+    };
+
+    loadUserConfigs();
+  }, [userPhone]);
 
   // 加载设备状态
   const loadDeviceStatus = useCallback(async () => {
@@ -1011,14 +1035,36 @@ export default function Home() {
     setDeviceStatus(null);
   };
 
-  const handleSaveNsConfig = (config: NightscoutConfig) => {
+  const handleSaveNsConfig = async (config: NightscoutConfig) => {
     setNsConfig(config);
-    localStorage.setItem('aaps-ns-config', JSON.stringify(config));
+    try {
+      await fetch('/api/user/ns-config', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-phone': userPhone!,
+        },
+        body: JSON.stringify(config),
+      });
+    } catch (error) {
+      console.error('Save NS config error:', error);
+    }
   };
 
-  const handleSaveSafetyConfig = (config: SafetyConfigType) => {
+  const handleSaveSafetyConfig = async (config: SafetyConfigType) => {
     setSafetyConfig(config);
-    localStorage.setItem('aaps-safety-config', JSON.stringify(config));
+    try {
+      await fetch('/api/user/safety-config', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-phone': userPhone!,
+        },
+        body: JSON.stringify(config),
+      });
+    } catch (error) {
+      console.error('Save safety config error:', error);
+    }
   };
 
   if (!userPhone) {

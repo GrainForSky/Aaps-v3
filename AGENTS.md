@@ -25,6 +25,9 @@ src/
 │   │   ├── command/             # 命令管理 API
 │   │   │   ├── create/route.ts     # 创建命令 (POST)
 │   │   │   └── status/route.ts     # 查询命令状态 (GET)
+│   │   ├── user/                # 用户配置 API（数据隔离）
+│   │   │   ├── ns-config/route.ts    # Nightscout 配置 (GET/POST)
+│   │   │   └── safety-config/route.ts # 安全规则配置 (GET/POST)
 │   │   └── nightscout/          # Nightscout API 代理
 │   │       ├── config/route.ts     # 连接测试 (POST)
 │   │       ├── treatments/route.ts # 治疗记录 (GET)
@@ -41,8 +44,9 @@ src/
 ├── lib/
 │   ├── types.ts               # 类型定义
 │   ├── config.ts              # 安全规则配置文件
+│   ├── db.ts                  # SQLite 数据库初始化和表结构
 │   ├── utils.ts               # 工具函数
-│   └── store.ts               # 内存数据存储（设备注册、命令队列）
+│   └── store.ts               # 数据存储层（SQLite，用户数据隔离）
 └── SOLUTION.md                # AndroidAPS 源码修改方案
 ```
 
@@ -65,20 +69,28 @@ src/
 
 ## 架构说明
 
+### 数据存储
+- 使用 SQLite 持久化存储（`data/aaps.db`）
+- 所有用户数据按手机号（phone）隔离
+- 表结构：users、devices、commands、ns_configs、safety_configs
+- 速率限制仍使用内存存储（无需持久化）
+
+### AndroidAPS 设备注册流程
+1. AndroidAPS 启动时调用 `POST /api/device/register`，提交 `phone`、`deviceId`、`appVersion`
+2. 服务端生成 `deviceToken` 并返回，AndroidAPS 保存此 token
+3. 后续所有设备请求需携带 `phone` + `deviceId` + `deviceToken` 三元组认证
+4. 设备每 30 秒发送心跳 `POST /api/device/heartbeat`
+5. 设备每 5 秒轮询命令 `GET /api/device/commands`
+6. 超过 60 秒无心跳标记为离线
+
 ### 命令流转
 ```
-Web 用户 → POST /api/command/create → 命令存入队列
+Web 用户 → POST /api/command/create → 命令存入 SQLite 队列
 AndroidAPS 设备 → GET /api/device/commands?phone=xxx → 获取待执行命令
 AndroidAPS 设备 → 执行命令 → POST /api/device/result → 上报结果
 Web 用户 → GET /api/command/status?id=xxx → 查询命令状态
 Web 用户 → GET /api/nightscout/treatments → Nightscout 二次确认
 ```
-
-### 设备管理
-- **注册**: 设备启动时调用 POST /api/device/register
-- **心跳**: 设备每 30 秒调用 POST /api/device/heartbeat
-- **轮询**: 设备每 5 秒调用 GET /api/device/commands
-- **离线判定**: 超过 60 秒无心跳标记为离线
 
 ## API 说明
 
@@ -93,6 +105,12 @@ Web 用户 → GET /api/nightscout/treatments → Nightscout 二次确认
 ### 命令管理 API
 - `POST /api/command/create` - 创建命令
 - `GET /api/command/status?id=` - 查询命令状态
+
+### 用户配置 API（数据隔离）
+- `GET /api/user/ns-config` - 获取当前用户的 Nightscout 配置
+- `POST /api/user/ns-config` - 保存当前用户的 Nightscout 配置
+- `GET /api/user/safety-config` - 获取当前用户的安全规则配置
+- `POST /api/user/safety-config` - 保存当前用户的安全规则配置
 
 ### Nightscout 代理 API
 - `POST /api/nightscout/config` - 测试 Nightscout 连接

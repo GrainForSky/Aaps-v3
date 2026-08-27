@@ -1,25 +1,15 @@
 // ============================================
-// AndroidAPS Remote Control - In-Memory Store
+// AndroidAPS Remote Control - SQLite Store
 // ============================================
 
+import db from './db';
 import {
   DeviceInfo,
   Command,
   User,
   SAFETY_RULES,
 } from './types';
-
-// 设备注册表
-const devices = new Map<string, DeviceInfo>();
-
-// 命令队列
-const commands = new Map<string, Command>();
-
-// 登录用户
-const users = new Map<string, User>();
-
-// 速率限制记录
-const rateLimits = new Map<string, number[]>();
+import crypto from 'crypto';
 
 // ============================================
 // 设备管理
@@ -30,17 +20,25 @@ export function registerDevice(
   deviceId: string,
   appVersion: string
 ): { deviceToken: string; message: string } {
-  const deviceToken = generateDeviceToken(phone, deviceId);
+  const deviceToken = crypto
+    .createHash('sha256')
+    .update(`${phone}:${deviceId}:${Date.now()}:${Math.random()}`)
+    .digest('hex');
+
   const now = Date.now();
 
-  devices.set(phone, {
-    phone,
-    deviceId,
-    deviceToken,
-    appVersion,
-    lastHeartbeat: now,
-    registeredAt: now,
-  });
+  const stmt = db.prepare(`
+    INSERT INTO devices (phone, device_id, device_token, app_version, last_heartbeat, registered_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(phone) DO UPDATE SET
+      device_id = excluded.device_id,
+      device_token = excluded.device_token,
+      app_version = excluded.app_version,
+      last_heartbeat = excluded.last_heartbeat,
+      registered_at = excluded.registered_at
+  `);
+
+  stmt.run(phone, deviceId, deviceToken, appVersion, now, now);
 
   return { deviceToken, message: `设备 ${deviceId} 注册成功` };
 }
@@ -50,27 +48,37 @@ export function updateHeartbeat(
   deviceId: string,
   deviceToken: string
 ): boolean {
-  const device = devices.get(phone);
+  const device = getDevice(phone);
   if (!device) return false;
   if (device.deviceId !== deviceId) return false;
   if (device.deviceToken !== deviceToken) return false;
 
-  device.lastHeartbeat = Date.now();
+  const now = Date.now();
+  db.prepare('UPDATE devices SET last_heartbeat = ? WHERE phone = ?').run(now, phone);
   return true;
 }
 
 export function getDevice(phone: string): DeviceInfo | undefined {
-  return devices.get(phone);
+  const row = db.prepare('SELECT * FROM devices WHERE phone = ?').get(phone) as any;
+  if (!row) return undefined;
+  return {
+    phone: row.phone,
+    deviceId: row.device_id,
+    deviceToken: row.device_token,
+    appVersion: row.app_version,
+    lastHeartbeat: row.last_heartbeat,
+    registeredAt: row.registered_at,
+  };
 }
 
 export function isDeviceOnline(phone: string): boolean {
-  const device = devices.get(phone);
+  const device = getDevice(phone);
   if (!device) return false;
   return Date.now() - device.lastHeartbeat < 60000;
 }
 
 export function getDeviceStatus(phone: string): 'online' | 'offline' | 'not_registered' {
-  const device = devices.get(phone);
+  const device = getDevice(phone);
   if (!device) return 'not_registered';
   return isDeviceOnline(phone) ? 'online' : 'offline';
 }
@@ -80,7 +88,7 @@ export function authenticateDevice(
   deviceId: string,
   deviceToken: string
 ): boolean {
-  const device = devices.get(phone);
+  const device = getDevice(phone);
   if (!device) return false;
   if (device.deviceId !== deviceId) return false;
   if (device.deviceToken !== deviceToken) return false;
@@ -91,6 +99,14 @@ export function authenticateDevice(
 // 命令管理
 // ============================================
 
+function generateCommandId(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const random = Array.from({ length: 12 }, () =>
+    chars.charAt(Math.floor(Math.random() * chars.length))
+  ).join('');
+  return `cmd_${Date.now().toString(36)}_${random}`;
+}
+
 export function createCommand(
   phone: string,
   type: 'bolus' | 'carbs',
@@ -98,36 +114,42 @@ export function createCommand(
   carbs?: number
 ): Command {
   const now = Date.now();
-  const command: Command = {
-    id: generateCommandId(),
+  const id = generateCommandId();
+  const expiresAt = now + SAFETY_RULES.COMMAND_EXPIRY_MINUTES * 60 * 1000;
+
+  db.prepare(`
+    INSERT INTO commands (id, phone, type, insulin, carbs, status, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+  `).run(id, phone, type, insulin ?? null, carbs ?? null, now, expiresAt);
+
+  return {
+    id,
     phone,
     type,
     insulin,
     carbs,
     status: 'pending',
     createdAt: now,
-    expiresAt: now + SAFETY_RULES.COMMAND_EXPIRY_MINUTES * 60 * 1000,
+    expiresAt,
   };
-
-  commands.set(command.id, command);
-  return command;
 }
 
 export function getPendingCommands(phone: string): Command[] {
   const now = Date.now();
-  const pending: Command[] = [];
 
-  for (const cmd of commands.values()) {
-    if (cmd.phone !== phone) continue;
-    if (cmd.status !== 'pending') continue;
-    if (now > cmd.expiresAt) {
-      cmd.status = 'expired';
-      continue;
-    }
-    pending.push(cmd);
-  }
+  // 先标记过期命令
+  db.prepare(`
+    UPDATE commands SET status = 'expired'
+    WHERE phone = ? AND status = 'pending' AND expires_at < ?
+  `).run(phone, now);
 
-  return pending;
+  const rows = db.prepare(`
+    SELECT * FROM commands
+    WHERE phone = ? AND status = 'pending'
+    ORDER BY created_at ASC
+  `).all(phone) as any[];
+
+  return rows.map(rowToCommand);
 }
 
 export function updateCommandStatus(
@@ -138,31 +160,55 @@ export function updateCommandStatus(
   success: boolean,
   message: string
 ): Command | null {
-  const command = commands.get(commandId);
+  const command = getCommand(commandId, phone);
   if (!command) return null;
-  if (command.phone !== phone) return null;
 
   // 验证设备身份
-  const device = devices.get(phone);
+  const device = getDevice(phone);
   if (!device) return null;
   if (device.deviceId !== deviceId) return null;
   if (device.deviceToken !== deviceToken) return null;
 
-  command.status = success ? 'completed' : 'failed';
-  command.result = {
+  const newStatus = success ? 'completed' : 'failed';
+  const result = {
     success,
     message,
     executedAt: Date.now(),
   };
 
-  return command;
+  db.prepare(`
+    UPDATE commands SET status = ?, result_json = ?
+    WHERE id = ? AND phone = ?
+  `).run(newStatus, JSON.stringify(result), commandId, phone);
+
+  return {
+    ...command,
+    status: newStatus as Command['status'],
+    result,
+  };
 }
 
 export function getCommand(commandId: string, phone: string): Command | null {
-  const command = commands.get(commandId);
-  if (!command) return null;
-  if (command.phone !== phone) return null;
-  return command;
+  const row = db.prepare(`
+    SELECT * FROM commands WHERE id = ? AND phone = ?
+  `).get(commandId, phone) as any;
+
+  if (!row) return null;
+  return rowToCommand(row);
+}
+
+function rowToCommand(row: any): Command {
+  return {
+    id: row.id,
+    phone: row.phone,
+    type: row.type,
+    insulin: row.insulin ?? undefined,
+    carbs: row.carbs ?? undefined,
+    status: row.status,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    result: row.result_json ? JSON.parse(row.result_json) : undefined,
+  };
 }
 
 // ============================================
@@ -170,32 +216,129 @@ export function getCommand(commandId: string, phone: string): Command | null {
 // ============================================
 
 export function loginUser(phone: string, pin: string): User {
-  const user: User = {
-    phone,
-    pin,
-    loggedInAt: Date.now(),
-  };
-  users.set(phone, user);
-  return user;
+  const now = Date.now();
+
+  // 使用 upsert：如果用户已存在则更新 PIN，不存在则创建
+  db.prepare(`
+    INSERT INTO users (phone, pin, created_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(phone) DO UPDATE SET pin = excluded.pin
+  `).run(phone, pin, now);
+
+  return { phone, pin, loggedInAt: now };
 }
 
 export function getUser(phone: string): User | undefined {
-  return users.get(phone);
+  const row = db.prepare('SELECT * FROM users WHERE phone = ?').get(phone) as any;
+  if (!row) return undefined;
+  return {
+    phone: row.phone,
+    pin: row.pin,
+    loggedInAt: row.created_at,
+  };
 }
 
 export function isAuthenticated(phone: string): boolean {
-  return users.has(phone);
+  const row = db.prepare('SELECT 1 FROM users WHERE phone = ?').get(phone);
+  return !!row;
 }
 
 export function verifyUser(phone: string, pin: string): boolean {
-  const user = users.get(phone);
-  if (!user) return false;
-  return user.pin === pin;
+  const row = db.prepare('SELECT pin FROM users WHERE phone = ?').get(phone) as any;
+  if (!row) return false;
+  return row.pin === pin;
 }
 
 // ============================================
-// 速率限制
+// Nightscout 配置（每用户隔离）
 // ============================================
+
+export function getNsConfig(phone: string): { url: string; apiSecret: string } {
+  const row = db.prepare('SELECT * FROM ns_configs WHERE phone = ?').get(phone) as any;
+  if (!row) return { url: '', apiSecret: '' };
+  return { url: row.url, apiSecret: row.api_secret };
+}
+
+export function saveNsConfig(phone: string, url: string, apiSecret: string): void {
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO ns_configs (phone, url, api_secret, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(phone) DO UPDATE SET
+      url = excluded.url,
+      api_secret = excluded.api_secret,
+      updated_at = excluded.updated_at
+  `).run(phone, url, apiSecret, now, now);
+}
+
+// ============================================
+// 安全规则配置（每用户隔离）
+// ============================================
+
+export function getSafetyConfig(phone: string): {
+  maxBolusUnits: number;
+  maxCarbsGrams: number;
+  insulinLockMinutes: number;
+  carbsLockMinutes: number;
+  commandTimeoutMinutes: number;
+} {
+  const row = db.prepare('SELECT * FROM safety_configs WHERE phone = ?').get(phone) as any;
+  if (!row) {
+    return {
+      maxBolusUnits: SAFETY_RULES.MAX_BOLUS_UNITS,
+      maxCarbsGrams: SAFETY_RULES.MAX_CARBS_GRAMS,
+      insulinLockMinutes: SAFETY_RULES.INSULIN_LOCK_MINUTES,
+      carbsLockMinutes: SAFETY_RULES.CARBS_LOCK_MINUTES,
+      commandTimeoutMinutes: SAFETY_RULES.COMMAND_EXPIRY_MINUTES,
+    };
+  }
+  return {
+    maxBolusUnits: row.max_bolus_units,
+    maxCarbsGrams: row.max_carbs_grams,
+    insulinLockMinutes: row.insulin_lock_minutes,
+    carbsLockMinutes: row.carbs_lock_minutes,
+    commandTimeoutMinutes: row.command_timeout_minutes,
+  };
+}
+
+export function saveSafetyConfig(
+  phone: string,
+  config: {
+    maxBolusUnits: number;
+    maxCarbsGrams: number;
+    insulinLockMinutes: number;
+    carbsLockMinutes: number;
+    commandTimeoutMinutes: number;
+  }
+): void {
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO safety_configs (phone, max_bolus_units, max_carbs_grams, insulin_lock_minutes, carbs_lock_minutes, command_timeout_minutes, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(phone) DO UPDATE SET
+      max_bolus_units = excluded.max_bolus_units,
+      max_carbs_grams = excluded.max_carbs_grams,
+      insulin_lock_minutes = excluded.insulin_lock_minutes,
+      carbs_lock_minutes = excluded.carbs_lock_minutes,
+      command_timeout_minutes = excluded.command_timeout_minutes,
+      updated_at = excluded.updated_at
+  `).run(
+    phone,
+    config.maxBolusUnits,
+    config.maxCarbsGrams,
+    config.insulinLockMinutes,
+    config.carbsLockMinutes,
+    config.commandTimeoutMinutes,
+    now,
+    now
+  );
+}
+
+// ============================================
+// 速率限制（仍使用内存，因为不需要持久化）
+// ============================================
+
+const rateLimits = new Map<string, number[]>();
 
 export function checkRateLimit(
   key: string,
@@ -216,24 +359,4 @@ export function checkRateLimit(
   validRequests.push(now);
   rateLimits.set(key, validRequests);
   return true;
-}
-
-// ============================================
-// 工具函数
-// ============================================
-
-function generateDeviceToken(phone: string, deviceId: string): string {
-  const crypto = require('crypto');
-  return crypto
-    .createHash('sha256')
-    .update(`${phone}:${deviceId}:${Date.now()}:${Math.random()}`)
-    .digest('hex');
-}
-
-function generateCommandId(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  const random = Array.from({ length: 12 }, () =>
-    chars.charAt(Math.floor(Math.random() * chars.length))
-  ).join('');
-  return `cmd_${Date.now().toString(36)}_${random}`;
 }
