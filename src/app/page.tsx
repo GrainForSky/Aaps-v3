@@ -59,16 +59,16 @@ function LoginScreen({ onLogin }: { onLogin: (phone: string) => void }) {
   const [pin, setPin] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [touched, setTouched] = useState({ phone: false, pin: false });
+
+  // 实时验证
+  const phoneError = touched.phone && !isValidPhone(phone) ? '请输入正确的 11 位手机号' : '';
+  const pinError = touched.pin && (pin.length > 0 && pin.length < 4) ? 'PIN 码至少 4 位' : '';
+  const isFormValid = isValidPhone(phone) && pin.length >= 4;
 
   const handleLogin = async () => {
-    if (!isValidPhone(phone)) {
-      setError('请输入正确的手机号');
-      return;
-    }
-    if (!pin || pin.length < 4) {
-      setError('PIN 码至少 4 位');
-      return;
-    }
+    setTouched({ phone: true, pin: true });
+    if (!isFormValid) return;
 
     setLoading(true);
     setError('');
@@ -109,25 +109,42 @@ function LoginScreen({ onLogin }: { onLogin: (phone: string) => void }) {
           <div className="space-y-2">
             <label className="text-sm font-medium text-slate-300">手机号</label>
             <Input
-              placeholder="请输入手机号"
+              placeholder="请输入 11 位手机号"
               value={phone}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPhone(e.target.value)}
-              className="bg-slate-700/50 border-slate-600 text-white placeholder:text-slate-500"
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                const val = e.target.value.replace(/\D/g, '');
+                setPhone(val);
+                if (touched.phone) setTouched(t => ({ ...t, phone: true }));
+              }}
+              onBlur={() => setTouched(t => ({ ...t, phone: true }))}
+              className={cn(
+                'bg-slate-700/50 border-slate-600 text-white placeholder:text-slate-500',
+                phoneError && 'border-red-500'
+              )}
               maxLength={11}
             />
+            {phoneError && <p className="text-xs text-red-400">{phoneError}</p>}
           </div>
 
           <div className="space-y-2">
             <label className="text-sm font-medium text-slate-300">PIN 码</label>
             <Input
               type="password"
-              placeholder="请输入 PIN 码（首次登录将自动注册）"
+              placeholder="请输入 PIN 码（至少 4 位）"
               value={pin}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPin(e.target.value)}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                const val = e.target.value.replace(/\D/g, '');
+                setPin(val);
+              }}
+              onBlur={() => setTouched(t => ({ ...t, pin: true }))}
               onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => e.key === 'Enter' && handleLogin()}
-              className="bg-slate-700/50 border-slate-600 text-white placeholder:text-slate-500"
+              className={cn(
+                'bg-slate-700/50 border-slate-600 text-white placeholder:text-slate-500',
+                pinError && 'border-red-500'
+              )}
               maxLength={8}
             />
+            {pinError && <p className="text-xs text-red-400">{pinError}</p>}
           </div>
 
           {error && (
@@ -139,8 +156,8 @@ function LoginScreen({ onLogin }: { onLogin: (phone: string) => void }) {
 
           <Button
             onClick={handleLogin}
-            disabled={loading || !phone || !pin}
-            className="w-full bg-cyan-600 hover:bg-cyan-500 text-white"
+            disabled={loading || !isFormValid}
+            className="w-full bg-cyan-600 hover:bg-cyan-500 text-white disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
             {loading ? '登录中...' : '登录'}
@@ -195,9 +212,22 @@ function ConfigScreen({
   const [insulinLockMinutes, setInsulinLockMinutes] = useState<number>(safetyConfig.insulinLockMinutes);
   const [carbsLockMinutes, setCarbsLockMinutes] = useState<number>(safetyConfig.carbsLockMinutes);
 
+  // 实时验证
+  const urlError = url.length > 0 && !/^https?:\/\/.+/.test(url) ? 'URL 必须以 http:// 或 https:// 开头' : '';
+  const maxBolusError = maxBolusUnits < 1 || maxBolusUnits > 100 ? '范围: 1-100 U' : '';
+  const maxCarbsError = maxCarbsGrams < 1 || maxCarbsGrams > 500 ? '范围: 1-500 g' : '';
+  const insulinLockError = insulinLockMinutes < 1 || insulinLockMinutes > 120 ? '范围: 1-120 分钟' : '';
+  const carbsLockError = carbsLockMinutes < 1 || carbsLockMinutes > 60 ? '范围: 1-60 分钟' : '';
+  const isNsValid = url.length > 0 && !urlError;
+  const isSafetyValid = !maxBolusError && !maxCarbsError && !insulinLockError && !carbsLockError;
+
   const testConnection = async () => {
-    if (!url || !apiSecret) {
-      setTestResult({ success: false, message: '请填写完整信息' });
+    if (!isNsValid) {
+      setTestResult({ success: false, message: '请填写正确的 Nightscout URL' });
+      return;
+    }
+    if (!apiSecret) {
+      setTestResult({ success: false, message: '请填写 API Secret' });
       return;
     }
 
@@ -264,8 +294,12 @@ function ConfigScreen({
                 placeholder="https://your-nightscout.herokuapp.com"
                 value={url}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => setUrl(e.target.value)}
-                className="bg-slate-700/50 border-slate-600 text-white"
+                className={cn(
+                  'bg-slate-700/50 border-slate-600 text-white',
+                  urlError && 'border-red-500'
+                )}
               />
+              {urlError && <p className="text-xs text-red-400">{urlError}</p>}
             </div>
 
             <div className="space-y-2">
@@ -282,14 +316,18 @@ function ConfigScreen({
             <div className="flex gap-2">
               <Button
                 onClick={testConnection}
-                disabled={testing}
+                disabled={testing || !isNsValid || !apiSecret}
                 variant="outline"
-                className="border-cyan-600 text-cyan-400 hover:bg-cyan-600/10"
+                className="border-cyan-600 text-cyan-400 hover:bg-cyan-600/10 disabled:opacity-50"
               >
                 {testing ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
                 {testing ? '测试中...' : '测试连接'}
               </Button>
-              <Button onClick={handleSave} className="bg-cyan-600 hover:bg-cyan-500 text-white">
+              <Button
+                onClick={handleSave}
+                disabled={!isNsValid || !isSafetyValid}
+                className="bg-cyan-600 hover:bg-cyan-500 text-white disabled:opacity-50"
+              >
                 保存配置
               </Button>
             </div>
@@ -341,49 +379,53 @@ function ConfigScreen({
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm text-slate-400 mb-1">最大胰岛素剂量 (U)</label>
+              <div className="space-y-1">
+                <label className="block text-sm text-slate-400">最大胰岛素剂量 (U)</label>
                 <Input
                   type="number"
                   value={maxBolusUnits}
                   onChange={(e) => setMaxBolusUnits(Number(e.target.value))}
                   min={1}
-                  max={50}
-                  className="bg-slate-900 border-slate-600 text-white"
+                  max={100}
+                  className={cn('bg-slate-900 border-slate-600 text-white', maxBolusError && 'border-red-500')}
                 />
+                {maxBolusError && <p className="text-xs text-red-400">{maxBolusError}</p>}
               </div>
-              <div>
-                <label className="block text-sm text-slate-400 mb-1">最大碳水剂量 (g)</label>
+              <div className="space-y-1">
+                <label className="block text-sm text-slate-400">最大碳水剂量 (g)</label>
                 <Input
                   type="number"
                   value={maxCarbsGrams}
                   onChange={(e) => setMaxCarbsGrams(Number(e.target.value))}
                   min={1}
-                  max={300}
-                  className="bg-slate-900 border-slate-600 text-white"
+                  max={500}
+                  className={cn('bg-slate-900 border-slate-600 text-white', maxCarbsError && 'border-red-500')}
                 />
+                {maxCarbsError && <p className="text-xs text-red-400">{maxCarbsError}</p>}
               </div>
-              <div>
-                <label className="block text-sm text-slate-400 mb-1">胰岛素锁定时间 (分钟)</label>
+              <div className="space-y-1">
+                <label className="block text-sm text-slate-400">胰岛素锁定时间 (分钟)</label>
                 <Input
                   type="number"
                   value={insulinLockMinutes}
                   onChange={(e) => setInsulinLockMinutes(Number(e.target.value))}
                   min={1}
-                  max={60}
-                  className="bg-slate-900 border-slate-600 text-white"
+                  max={120}
+                  className={cn('bg-slate-900 border-slate-600 text-white', insulinLockError && 'border-red-500')}
                 />
+                {insulinLockError && <p className="text-xs text-red-400">{insulinLockError}</p>}
               </div>
-              <div>
-                <label className="block text-sm text-slate-400 mb-1">碳水锁定时间 (分钟)</label>
+              <div className="space-y-1">
+                <label className="block text-sm text-slate-400">碳水锁定时间 (分钟)</label>
                 <Input
                   type="number"
                   value={carbsLockMinutes}
                   onChange={(e) => setCarbsLockMinutes(Number(e.target.value))}
                   min={1}
-                  max={30}
-                  className="bg-slate-900 border-slate-600 text-white"
+                  max={60}
+                  className={cn('bg-slate-900 border-slate-600 text-white', carbsLockError && 'border-red-500')}
                 />
+                {carbsLockError && <p className="text-xs text-red-400">{carbsLockError}</p>}
               </div>
             </div>
           </CardContent>
@@ -481,6 +523,28 @@ function DeliveryControl({
   const [showInsulinConfirm, setShowInsulinConfirm] = useState(false);
   const [showCarbsConfirm, setShowCarbsConfirm] = useState(false);
 
+  // 胰岛素剂量验证
+  const insulinDoseNum = parseFloat(insulinDose);
+  const insulinError = insulinDose.length > 0
+    ? (isNaN(insulinDoseNum) ? '请输入有效数字'
+      : insulinDoseNum <= 0 ? '剂量必须大于 0'
+      : insulinDoseNum > externalSafetyConfig.maxBolusUnits ? `不能超过 ${externalSafetyConfig.maxBolusUnits} U`
+      : insulinDoseNum < 0.1 ? '最小剂量 0.1 U'
+      : '')
+    : '';
+  const isInsulinValid = !isNaN(insulinDoseNum) && insulinDoseNum > 0 && insulinDoseNum <= externalSafetyConfig.maxBolusUnits && insulinDoseNum >= 0.1;
+
+  // 碳水剂量验证
+  const carbsDoseNum = parseFloat(carbsDose);
+  const carbsError = carbsDose.length > 0
+    ? (isNaN(carbsDoseNum) ? '请输入有效数字'
+      : carbsDoseNum <= 0 ? '剂量必须大于 0'
+      : carbsDoseNum > externalSafetyConfig.maxCarbsGrams ? `不能超过 ${externalSafetyConfig.maxCarbsGrams} g`
+      : carbsDoseNum < 1 ? '最小剂量 1 g'
+      : '')
+    : '';
+  const isCarbsValid = !isNaN(carbsDoseNum) && carbsDoseNum > 0 && carbsDoseNum <= externalSafetyConfig.maxCarbsGrams && carbsDoseNum >= 1;
+
   const handleInsulinSubmit = async () => {
     const dose = parseFloat(insulinDose);
     if (isNaN(dose) || dose <= 0 || dose > externalSafetyConfig.maxBolusUnits) {
@@ -576,7 +640,10 @@ function DeliveryControl({
           )}
 
           <div className="space-y-2">
-            <label className="text-sm font-medium text-slate-300">剂量 (U)</label>
+            <label className="text-sm font-medium text-slate-300">
+              剂量 (U)
+              <span className="text-xs text-slate-500 ml-2">范围: 0.1 - {externalSafetyConfig.maxBolusUnits} U</span>
+            </label>
             <Input
               type="number"
               step="0.1"
@@ -586,12 +653,16 @@ function DeliveryControl({
               value={insulinDose}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setInsulinDose(e.target.value)}
               disabled={isInsulinLocked || commandState.status !== 'idle'}
-              className="bg-slate-700/50 border-slate-600 text-white text-2xl font-bold"
+              className={cn(
+                'bg-slate-700/50 border-slate-600 text-white text-2xl font-bold',
+                insulinError && 'border-red-500'
+              )}
             />
+            {insulinError && <p className="text-xs text-red-400">{insulinError}</p>}
           </div>
 
           <div className="flex flex-wrap gap-2">
-            {quickDoses.map((dose) => (
+            {quickDoses.filter(d => d <= externalSafetyConfig.maxBolusUnits).map((dose) => (
               <Button
                 key={dose}
                 variant="outline"
@@ -607,8 +678,8 @@ function DeliveryControl({
 
           <Button
             onClick={() => setShowInsulinConfirm(true)}
-            disabled={isInsulinLocked || !insulinDose || commandState.status !== 'idle'}
-            className="w-full bg-amber-600 hover:bg-amber-500 text-white"
+            disabled={isInsulinLocked || !isInsulinValid || commandState.status !== 'idle'}
+            className="w-full bg-amber-600 hover:bg-amber-500 text-white disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Send className="w-4 h-4 mr-2" />
             发送胰岛素命令
@@ -638,7 +709,10 @@ function DeliveryControl({
           )}
 
           <div className="space-y-2">
-            <label className="text-sm font-medium text-slate-300">剂量 (g)</label>
+            <label className="text-sm font-medium text-slate-300">
+              剂量 (g)
+              <span className="text-xs text-slate-500 ml-2">范围: 1 - {externalSafetyConfig.maxCarbsGrams} g</span>
+            </label>
             <Input
               type="number"
               step="1"
@@ -648,12 +722,16 @@ function DeliveryControl({
               value={carbsDose}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCarbsDose(e.target.value)}
               disabled={isCarbsLocked || commandState.status !== 'idle'}
-              className="bg-slate-700/50 border-slate-600 text-white text-2xl font-bold"
+              className={cn(
+                'bg-slate-700/50 border-slate-600 text-white text-2xl font-bold',
+                carbsError && 'border-red-500'
+              )}
             />
+            {carbsError && <p className="text-xs text-red-400">{carbsError}</p>}
           </div>
 
           <div className="flex flex-wrap gap-2">
-            {quickCarbs.map((dose) => (
+            {quickCarbs.filter(d => d <= externalSafetyConfig.maxCarbsGrams).map((dose) => (
               <Button
                 key={dose}
                 variant="outline"
@@ -669,8 +747,8 @@ function DeliveryControl({
 
           <Button
             onClick={() => setShowCarbsConfirm(true)}
-            disabled={isCarbsLocked || !carbsDose || commandState.status !== 'idle'}
-            className="w-full bg-green-600 hover:bg-green-500 text-white"
+            disabled={isCarbsLocked || !isCarbsValid || commandState.status !== 'idle'}
+            className="w-full bg-green-600 hover:bg-green-500 text-white disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Send className="w-4 h-4 mr-2" />
             发送碳水命令
