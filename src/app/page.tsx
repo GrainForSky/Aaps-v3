@@ -889,7 +889,8 @@ function DataPanel({ nsConfig }: { nsConfig: NightscoutConfig }) {
   }
 
   const latestEntry = entries[0];
-  const bgValue = latestEntry?.sgv;
+  const bgValueMgdl = latestEntry?.sgv;
+  const bgValueMmol = bgValueMgdl ? (bgValueMgdl / 18.0182).toFixed(1) : null;
   const bgTrend = latestEntry?.direction;
 
   return (
@@ -903,11 +904,11 @@ function DataPanel({ nsConfig }: { nsConfig: NightscoutConfig }) {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {bgValue ? (
+          {bgValueMgdl ? (
             <div className="text-center">
-              <div className="text-6xl font-bold text-cyan-400">{bgValue}</div>
+              <div className="text-6xl font-bold text-cyan-400">{bgValueMmol}</div>
               <div className="text-slate-400 mt-2">
-                mg/dL {bgTrend && `(${bgTrend})`}
+                mmol/L {bgTrend && `(${bgTrend})`}
               </div>
               <div className="text-xs text-slate-500 mt-1">
                 {timeAgo(latestEntry.date)}
