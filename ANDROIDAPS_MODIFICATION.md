@@ -98,7 +98,13 @@ RemoteControlDeviceToken("remotecontrol_device_token", "", isPassword = true),
 )
 ```
 
-并在 `Bindings` 接口中无需改动（绑定已写在 RemoteControlModule 内）。
+`RemoteControlModule` 内部已完成三项绑定（与 `SMSCommunicatorModule` 写法一致，均为抽象模块方法，不需要内部子 Module）：
+
+- `@ContributesAndroidInjector abstract fun contributesRemoteControlFragment()` —— 注册 Fragment
+- `@Binds abstract fun bindPlugin(plugin: RemoteControlPlugin): PluginBase` —— **关键**：绑定为 `PluginBase`，ConfigBuilder 的插件列表才能发现并加载该插件
+- `@Binds abstract fun bindRemoteControl(plugin: RemoteControlPlugin): RemoteControl` —— 绑定对外接口，供 Fragment 注入查询状态
+
+> 若缺少 `bindPlugin(...) : PluginBase` 这条绑定，插件永远不会出现在 AndroidAPS 的插件列表里（这是最常见的"插件不生效"原因）。
 
 ### 2.3 字符串资源
 
@@ -136,6 +142,18 @@ RemoteControlDeviceToken("remotecontrol_device_token", "", isPassword = true),
 - **权限**：`INTERNET`、`ACCESS_NETWORK_STATE`、`FOREGROUND_SERVICE` 在
   `app/src/main/AndroidManifest.xml` 中已存在，无需新增。
 - **依赖**：okhttp3 已由 `core:nssdk` 传递提供，无需改 gradle。
+
+### 2.6 命令只下发一次（防重复输注）
+
+服务端 `GET /api/device/commands` 在一个 SQLite 事务内完成「`pending` → `executing`」的原子领取，
+并立即给命令打上 `delivered=1` 标记：
+
+- 同一条命令**在整个生命周期内只会返回给设备一次**，后续轮询不再返回，从根本上杜绝重复胰岛素输注；
+- 设备执行后通过 `POST /api/device/result` 上报，命令变为 `completed`/`failed`；
+- 若结果上报丢失，命令停留在 `executing`（不会重发），Web 端靠命令状态查询 + 5 分钟过期兜底判定。
+
+插件侧无需做去重，但 `CommandQueue` 回调里的结果上报放在 `Dispatchers.IO` 协程中执行，
+避免网络请求阻塞泵线程。
 
 ---
 

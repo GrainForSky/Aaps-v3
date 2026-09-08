@@ -137,19 +137,52 @@ export function createCommand(
 export function getPendingCommands(phone: string): Command[] {
   const now = Date.now();
 
-  // 先标记过期命令
-  db.prepare(`
-    UPDATE commands SET status = 'expired'
-    WHERE phone = ? AND status = 'pending' AND expires_at < ?
-  `).run(phone, now);
+  // 原子地"领取"待执行命令，保证同一条命令只下发一次（绝不重复输注）。
+  //
+  // 状态流转：pending -> executing -> completed/failed
+  //   - pending：刚创建，等待设备拉取
+  //   - executing：已下发且仅下发一次；设备执行后上报 result 转为 completed/failed
+  //   - 若设备执行了但结果上报丢失，命令会停留在 executing（不会再次下发），
+  //     Web 端通过命令状态查询 + 5 分钟过期兜底判定，避免重复给胰岛素。
+  //
+  // better-sqlite3 事务同步执行，整个"标记 + 读取"过程对其他调用不可见，避免并发重复领取。
+  const claim = db.transaction((): any[] => {
+    // 1. 标记尚未下发且已过期的命令
+    db.prepare(`
+      UPDATE commands SET status = 'expired'
+      WHERE phone = ? AND status = 'pending' AND expires_at < ?
+    `).run(phone, now);
 
-  const rows = db.prepare(`
-    SELECT * FROM commands
-    WHERE phone = ? AND status = 'pending'
-    ORDER BY created_at ASC
-  `).all(phone) as any[];
+    // 2. 原子领取：把所有 pending 命令改为 executing（一次性，不重发）
+    db.prepare(`
+      UPDATE commands SET status = 'executing'
+      WHERE phone = ? AND status = 'pending'
+    `).run(phone);
 
-  return rows.map(rowToCommand);
+    // 3. 取出"本次刚被领取"的行（status=executing 且尚未标记 delivered）
+    const rows = db.prepare(`
+      SELECT * FROM commands
+      WHERE phone = ?
+        AND status = 'executing'
+        AND COALESCE(json_extract(result_json, '$.delivered'), 0) = 0
+      ORDER BY created_at ASC
+    `).all(phone) as any[];
+
+    // 4. 立即打上 delivered=1，保证下一轮轮询不再返回（同一事务内完成）
+    if (rows.length > 0) {
+      const ids = rows.map((r: any) => r.id);
+      const placeholders = ids.map(() => '?').join(',');
+      db.prepare(`
+        UPDATE commands
+        SET result_json = json_object('delivered', 1, 'deliveredAt', ?)
+        WHERE id IN (${placeholders})
+      `).run(now, ...ids);
+    }
+
+    return rows;
+  });
+
+  return claim().map(rowToCommand);
 }
 
 export function updateCommandStatus(
@@ -174,6 +207,7 @@ export function updateCommandStatus(
     success,
     message,
     executedAt: Date.now(),
+    reported: 1,
   };
 
   db.prepare(`
