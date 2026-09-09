@@ -73,8 +73,8 @@ RemoteControlPhone("remotecontrol_phone", ""),
 RemoteControlDeviceToken("remotecontrol_device_token", "", isPassword = true),
 ```
 
-> 插件启用开关由 `PluginBase`/ConfigBuilder 自动管理（`simple_mode` 下的插件 enable 状态），
-> 无需自定义 BooleanKey。
+> 插件启用开关由 ConfigBuilder 自动管理（`PluginBase.isEnabled()`），无需自定义 BooleanKey。
+> Fragment 通过注入 `RemoteControl` 接口调用 `isEnabled()` 读取启用状态。
 
 ### 2.2 注册 Dagger 模块
 

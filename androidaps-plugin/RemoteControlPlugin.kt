@@ -10,10 +10,8 @@ import app.aaps.core.interfaces.logging.UserEntryLogger
 import app.aaps.core.interfaces.plugin.PluginBase
 import app.aaps.core.interfaces.plugin.PluginDescription
 import app.aaps.core.interfaces.resources.ResourceHelper
-import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.plugins.main.general.remotecontrol.events.EventRemoteControlUpdateGui
-import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import app.aaps.core.objects.R as CoreObjectsR
 import app.aaps.plugins.main.R
 import kotlinx.coroutines.CoroutineScope
@@ -37,8 +35,6 @@ import javax.inject.Singleton
 class RemoteControlPlugin @Inject constructor(
     aapsLogger: AAPSLogger,
     rh: ResourceHelper,
-    private val aapsSchedulers: AapsSchedulers,
-    private val fabricPrivacy: FabricPrivacy,
     private val commandQueue: CommandQueue,
     private val uel: UserEntryLogger,
     private val rxBus: RxBus,
@@ -50,7 +46,6 @@ class RemoteControlPlugin @Inject constructor(
         .pluginIcon(CoreObjectsR.drawable.ic_sms)
         .pluginName(R.string.remotecontrol)
         .shortName(R.string.remotecontrol_shortname)
-        .preferencesId(PluginDescription.PREFERENCE_SCREEN)
         .description(R.string.description_remote_control)
         .enableByDefault(false),
     aapsLogger, rh
