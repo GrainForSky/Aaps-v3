@@ -81,6 +81,15 @@ class RemoteControlPlugin @Inject constructor(
         super.onStop()
     }
 
+    override fun restart() {
+        if (!isEnabled()) return
+        pollJob?.cancel()
+        heartbeatJob?.cancel()
+        pollJob = null
+        heartbeatJob = null
+        registerAndStart()
+    }
+
     private fun registerAndStart() {
         scope.launch {
             try {

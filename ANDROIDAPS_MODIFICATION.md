@@ -29,8 +29,9 @@ AndroidAPS → 每 30 秒 POST /api/device/heartbeat 保活
 | `RemoteControlPlugin.kt` | 插件入口（GENERAL 类型），管理轮询/心跳协程，执行 bolus/carbs |
 | `RemoteControl.kt` | 插件对外接口（Fragment 查询状态） |
 | `RemoteControlApi.kt` | OkHttp 通信层：注册/心跳/拉命令/上报结果 |
-| `RemoteControlFragment.kt` | 状态界面 |
+| `RemoteControlFragment.kt` | 配置与状态界面（输入服务器地址/手机号，保存后启用） |
 | `events/EventRemoteControlUpdateGui.kt` | RxBus 界面刷新事件 |
+| `keys/RemoteControlStringKey.kt` | 插件本地持久化 key（StringNonPreferenceKey） |
 | `di/RemoteControlModule.kt` | Dagger 模块（Fragment 注入 + 接口绑定） |
 
 ### 关键实现说明（与源码 API 对应）
@@ -41,8 +42,9 @@ AndroidAPS → 每 30 秒 POST /api/device/heartbeat 保活
    - 回调继承 `app.aaps.core.interfaces.queue.Callback`，在 `run()` 中读 `result.success` / `result.bolusDelivered`
    - 这与 SMS Communicator 插件 `processBOLUS`/`processCARBS` 的用法完全一致
 
-2. **偏好存储**：使用 `Preferences` + 类型化 key（`StringKey.RemoteControlXxx`），
-   读取 `preferences.get(StringKey.X)`，写入 `preferences.put(StringKey.X, value)`。
+2. **偏好存储**：使用插件本地 `RemoteControlStringKey`（`StringNonPreferenceKey`），
+   读取 `preferences.get(RemoteControlStringKey.ServerUrl)`，写入 `preferences.put(key, value)`，
+   不修改 core 的 `StringKey` 枚举。
 
 3. **插件声明**：继承 `PluginBase`，`PluginDescription().mainType(PluginType.GENERAL)...`，
    图标用 `app.aaps.core.objects.R.drawable.ic_sms`。
@@ -61,20 +63,27 @@ AndroidAPS → 每 30 秒 POST /api/device/heartbeat 保活
 
 ## 二、需要修改的现有文件
 
-### 2.1 新增偏好 Key
+### 2.1 偏好 Key（插件本地，无需修改 core）
 
-**文件**：`core/keys/src/main/kotlin/app/aaps/core/keys/StringKey.kt`
-
-在 enum 中添加（与 `SmsAllowedNumbers` 同级）：
+持久化 key 已定义在插件本地文件
+`plugins/main/src/main/kotlin/app/aaps/plugins/main/general/remotecontrol/keys/RemoteControlStringKey.kt`，
+使用 `StringNonPreferenceKey`（与 `OverviewStringKey`、`AutomationStringKey` 同款），
+**不需要修改** `core/keys/StringKey.kt`：
 
 ```kotlin
-RemoteControlServerUrl("remotecontrol_server_url", ""),
-RemoteControlPhone("remotecontrol_phone", ""),
-RemoteControlDeviceToken("remotecontrol_device_token", "", isPassword = true),
+enum class RemoteControlStringKey(
+    override val key: String,
+    override val defaultValue: String,
+    override val exportable: Boolean = false
+) : StringNonPreferenceKey {
+    ServerUrl("remotecontrol_server_url", ""),
+    Phone("remotecontrol_phone", ""),
+    DeviceToken("remotecontrol_device_token", "")
+}
 ```
 
 > 插件启用开关由 ConfigBuilder 自动管理（`PluginBase.isEnabled()`），无需自定义 BooleanKey。
-> Fragment 通过注入 `RemoteControl` 接口调用 `isEnabled()` 读取启用状态。
+> Fragment 保存配置时调用 `setPluginEnabled(PluginType.GENERAL, true)` 启用插件。
 
 ### 2.2 注册 Dagger 模块
 
@@ -110,25 +119,11 @@ RemoteControlDeviceToken("remotecontrol_device_token", "", isPassword = true),
 
 **文件**：`plugins/main/src/main/res/values/strings.xml`
 
-把 `androidaps-plugin/res/strings-remotecontrol.xml` 中的 `<string>` 条目合并进去：
+把 `androidaps-plugin/res/strings-remotecontrol.xml` 整个文件复制为
+`plugins/main/src/main/res/values/remotecontrol.xml`（这是一个完整合法的
+`<resources>` 文件，可直接放置，Android 会自动合并，无需手动并入现有 strings.xml）。
 
-```xml
-<string name="remotecontrol">RemoteControl</string>
-<string name="remotecontrol_shortname">RemoteCtrl</string>
-<string name="description_remote_control">通过 Web 服务端命令队列远程输注胰岛素/碳水（设备主动轮询）。</string>
-<string name="remotecontrol_server_url">服务器地址</string>
-<string name="remotecontrol_phone">手机号</string>
-<string name="remotecontrol_device_token">设备令牌（自动填充）</string>
-<string name="remotecontrol_executing_bolus">正在执行胰岛素输注 %.1f U</string>
-<string name="remotecontrol_bolus_done">胰岛素输注完成 %.1f U</string>
-<string name="remotecontrol_bolus_failed">胰岛素输注失败</string>
-<string name="remotecontrol_executing_carbs">正在记录碳水 %d g</string>
-<string name="remotecontrol_carbs_done">碳水已记录 %d g</string>
-<string name="remotecontrol_carbs_failed">碳水记录失败</string>
-<string name="remotecontrol_status">状态</string>
-```
-
-> 中文翻译可放到 `plugins/main/src/main/res/values-zh-rCN/strings.xml`。
+> 中文翻译可放到 `plugins/main/src/main/res/values-zh-rCN/remotecontrol.xml`。
 
 ### 2.4 Fragment 布局
 

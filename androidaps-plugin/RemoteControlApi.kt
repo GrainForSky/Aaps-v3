@@ -4,7 +4,7 @@ import android.content.Context
 import android.provider.Settings
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
-import app.aaps.core.keys.StringKey
+import app.aaps.plugins.main.general.remotecontrol.keys.RemoteControlStringKey
 import app.aaps.core.keys.interfaces.Preferences
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -43,14 +43,14 @@ class RemoteControlApi @Inject constructor(
         .build()
 
     private fun serverUrl(): String =
-        preferences.get(StringKey.RemoteControlServerUrl).trimEnd('/')
+        preferences.get(RemoteControlStringKey.ServerUrl).trimEnd('/')
 
     private fun phone(): String =
-        preferences.get(StringKey.RemoteControlPhone)
+        preferences.get(RemoteControlStringKey.Phone)
 
     fun isConfigured(): Boolean {
-        val url = preferences.get(StringKey.RemoteControlServerUrl)
-        val phone = preferences.get(StringKey.RemoteControlPhone)
+        val url = preferences.get(RemoteControlStringKey.ServerUrl)
+        val phone = preferences.get(RemoteControlStringKey.Phone)
         return url.isNotBlank() && phone.isNotBlank()
     }
 
@@ -60,10 +60,10 @@ class RemoteControlApi @Inject constructor(
     }
 
     private fun cachedToken(): String =
-        preferences.get(StringKey.RemoteControlDeviceToken)
+        preferences.get(RemoteControlStringKey.DeviceToken)
 
     private fun storeToken(token: String) {
-        preferences.put(StringKey.RemoteControlDeviceToken, token)
+        preferences.put(RemoteControlStringKey.DeviceToken, token)
     }
 
     /**

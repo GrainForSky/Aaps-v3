@@ -9,4 +9,7 @@ interface RemoteControl {
 
     /** 插件是否已启用（由 ConfigBuilder 管理）。 */
     fun isEnabled(): Boolean
+
+    /** 配置保存后重新启动轮询/心跳（若已启用）。 */
+    fun restart()
 }

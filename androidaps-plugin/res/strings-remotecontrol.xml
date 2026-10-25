@@ -1,26 +1,29 @@
-<!-- 添加到 plugins/main/src/main/res/values/strings.xml -->
-<string name="remotecontrol">RemoteControl</string>
-<string name="remotecontrol_shortname">RemoteCtrl</string>
-<string name="description_remote_control">通过 Web 服务端命令队列远程输注胰岛素/碳水（设备主动轮询）。</string>
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="remotecontrol">RemoteControl</string>
+    <string name="remotecontrol_shortname">RemoteCtrl</string>
+    <string name="description_remote_control">通过 Web 服务端命令队列远程输注胰岛素/碳水（设备主动轮询）。</string>
 
-<!-- 偏好设置（在 RemoteControlPreferenceFragment 中显示） -->
-<string name="remotecontrol_title">远程控制</string>
-<string name="remotecontrol_server_url">服务器地址</string>
-<string name="remotecontrol_phone">手机号</string>
-<string name="remotecontrol_device_token">设备令牌（自动填充）</string>
+    <!-- 状态界面 -->
+    <string name="remotecontrol_title">远程控制</string>
+    <string name="remotecontrol_server_url">服务器地址</string>
+    <string name="remotecontrol_phone">手机号</string>
+    <string name="remotecontrol_device_token">设备令牌</string>
+    <string name="remotecontrol_save">保存并启用</string>
+    <string name="remotecontrol_status_enabled">已启用</string>
+    <string name="remotecontrol_status_disabled">未启用（请在配置页开启插件后设置）</string>
+    <string name="remotecontrol_token_pending">未注册（启用并保存后自动注册）</string>
+    <string name="remotecontrol_token_registered">已注册</string>
+    <string name="remotecontrol_last_heartbeat">最后活动</string>
+    <string name="remotecontrol_invalid_url">请输入以 http:// 或 https:// 开头的服务器地址</string>
+    <string name="remotecontrol_invalid_phone">请输入手机号</string>
+    <string name="remotecontrol_saved">配置已保存</string>
 
-<!-- Fragment 状态界面 -->
-<string name="remotecontrol_not_configured">未配置</string>
-<string name="remotecontrol_status_enabled">已启用</string>
-<string name="remotecontrol_status_disabled">未启用</string>
-<string name="remotecontrol_token_pending">未注册</string>
-<string name="remotecontrol_token_registered">已注册</string>
-<string name="remotecontrol_last_heartbeat">最后活动</string>
-
-<!-- 执行过程提示 -->
-<string name="remotecontrol_executing_bolus">正在执行胰岛素输注 %.1f U</string>
-<string name="remotecontrol_bolus_done">胰岛素输注完成 %.1f U</string>
-<string name="remotecontrol_bolus_failed">胰岛素输注失败</string>
-<string name="remotecontrol_executing_carbs">正在记录碳水 %d g</string>
-<string name="remotecontrol_carbs_done">碳水已记录 %d g</string>
-<string name="remotecontrol_carbs_failed">碳水记录失败</string>
+    <!-- 执行过程提示 -->
+    <string name="remotecontrol_executing_bolus">正在执行胰岛素输注 %.1f U</string>
+    <string name="remotecontrol_bolus_done">胰岛素输注完成 %.1f U</string>
+    <string name="remotecontrol_bolus_failed">胰岛素输注失败</string>
+    <string name="remotecontrol_executing_carbs">正在记录碳水 %d g</string>
+    <string name="remotecontrol_carbs_done">碳水已记录 %d g</string>
+    <string name="remotecontrol_carbs_failed">碳水记录失败</string>
+</resources>
